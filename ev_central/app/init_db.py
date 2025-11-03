@@ -12,14 +12,18 @@ def create_tables():
         conn = sqlite3.connect(DB_NAME)
         cursor = conn.cursor()
         
+        # --- TABLA CORREGIDA ---
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS ChargingPoints (
                 cp_id TEXT PRIMARY KEY,
                 location TEXT NOT NULL,
                 price_kwh REAL NOT NULL,
-                status TEXT DEFAULT 'DESCONECTADO'
+                status TEXT DEFAULT 'DESCONECTADO',
+                last_heartbeat DATETIME DEFAULT CURRENT_TIMESTAMP,
+                last_update DATETIME DEFAULT CURRENT_TIMESTAMP
             )
         """)
+        # --- FIN CORRECCIÓN ---
         
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS Drivers (
