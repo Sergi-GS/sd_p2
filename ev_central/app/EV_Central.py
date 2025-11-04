@@ -437,6 +437,9 @@ def check_cp_heartbeats(producer):
         # así que esas funciones ya están bien.
 
 # --- 4. Lógica del Dashboard (TUI) ---
+# --- 4. Lógica del Dashboard (TUI) ---
+
+# --- 4. Lógica del Dashboard (TUI) ---
 
 def generate_dashboard():
     """Genera la tabla de Rich para el dashboard."""
@@ -446,6 +449,13 @@ def generate_dashboard():
     table.add_column("Precio (€/kWh)", style="yellow")
     table.add_column("Estado", style="white")
 
+    # --- ESTILOS CORREGIDOS ---
+    # "Chillón": Verde brillante Y negrita
+    style_suministrando_chillon = Style(color="bright_green", bold=True)
+    # "Oscuro": Verde normal, SIN negrita
+    style_suministrando_oscuro = Style(color="green")
+    # --- FIN CORRECCIÓN ---
+
     conn = get_db_connection()
     try:
         cursor = conn.execute("SELECT cp_id, location, price_kwh, status FROM ChargingPoints ORDER BY cp_id")
@@ -453,7 +463,20 @@ def generate_dashboard():
         
         for row in rows:
             status = row['status']
-            style = STATUS_COLORS.get(status, Style(color="white"))
+            style = None # Reiniciar el estilo para cada fila
+
+            # --- LÓGICA DE PARPADEO MODIFICADA ---
+            if status == 'SUMINISTRANDO':
+                # Comprueba si el segundo actual es par o impar
+                if int(time.time()) % 2 == 0:
+                    style = style_suministrando_chillon
+                else:
+                    style = style_suministrando_oscuro
+            else:
+                # Lógica normal para todos los demás estados
+                style = STATUS_COLORS.get(status, Style(color="white"))
+            # --- FIN LÓGICA MODIFICADA ---
+            
             table.add_row(
                 row['cp_id'],
                 row['location'],
@@ -468,7 +491,6 @@ def generate_dashboard():
         conn.close()
         
     return Panel(table)
-
 # --- Hilo Principal ---
 
 if __name__ == "__main__":
