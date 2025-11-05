@@ -175,7 +175,7 @@ def main():
                 raise ConnectionError("Fallo al registrarse.")
             
             print(f"[{cp_id_global}-Monitor] ✅ Registrado en Central como {args.cp_id}.")
-            last_reported_status = "ACTIVADO" # Resetear estado en cada registro
+            last_reported_status = "DESCONECTADO" # Resetear estado en cada registro
             
             # 2. Iniciar hilo de Heartbeat (Hilo 2)
             heartbeat_thread = threading.Thread(target=central_heartbeat_loop, daemon=True)

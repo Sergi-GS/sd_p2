@@ -10,6 +10,8 @@ from kafka import KafkaConsumer, KafkaProducer
 service_finished_event = threading.Event()
 current_driver_id = None
 
+# EV_Driver.py (Reemplazar esta función)
+
 def start_kafka_listener(driver_id, kafka_broker, response_topic):
     """
     Inicia el consumidor en un hilo separado.
@@ -37,7 +39,6 @@ def start_kafka_listener(driver_id, kafka_broker, response_topic):
                 if status == 'APPROVED':
                     print(f"\n[{driver_id}] ✅ SOLICITUD APROBADA para {data.get('cp_id')}.")
                     print(f"[{driver_id}] ...Esperando inicio de telemetría...")
-                    # No hacemos .set() aquí; esperamos al "FINALIZADO"
                 
                 elif status == 'DENIED':
                     print(f"\n[{driver_id}] ❌ SOLICITUD DENEGADA para {data.get('cp_id')}.")
@@ -46,19 +47,24 @@ def start_kafka_listener(driver_id, kafka_broker, response_topic):
 
             # --- Tópico 2: Telemetría del Engine ---
             elif msg.topic == 'topic_data_streaming':
-                # IMPORTANTE: Filtrar para ver solo la telemetría de este driver
                 if data.get('driver_id') != driver_id:
-                    continue # Ignorar telemetría de otros drivers
+                    continue
                 
                 status = data.get('status')
                 
                 if status == 'SUMINISTRANDO':
-                    # Usar \r para reescribir la línea y crear un efecto "en tiempo real"
                     print(f"\r[{driver_id}] 🔌 Recargando... {data.get('kwh'):.2f} kWh | {data.get('euros'):.2f} €", end="")
                 
+                # --- LÓGICA DE FINALIZACIÓN MODIFICADA ---
                 elif status == 'FINALIZADO':
                     print(f"\n[{driver_id}] ✅ Recarga FINALIZADA.")
                     print(f"    Total: {data.get('total_kwh'):.2f} kWh")
+                    print(f"    Coste: {data.get('total_euros'):.2f} €")
+                    service_finished_event.set() # Desbloquea el hilo principal
+                
+                elif status == 'FINALIZADO_AVERIA':
+                    print(f"\n[{driver_id}] ❌ Recarga INTERRUMPIDA POR AVERÍA.")
+                    print(f"    Total cargado: {data.get('total_kwh'):.2f} kWh")
                     print(f"    Coste: {data.get('total_euros'):.2f} €")
                     service_finished_event.set() # Desbloquea el hilo principal
 

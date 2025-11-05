@@ -160,7 +160,7 @@ def handle_socket_client(conn, addr, producer, active_connections, lock):
                     location = parts[2]
                     price = float(parts[3])
                     register_cp_in_db(cp_id_autenticado, location, price)
-                    update_cp_status_in_db(cp_id_autenticado, "ACTIVADO")
+                    update_cp_status_in_db(cp_id_autenticado, "DESCONECTADO")
                     broadcast_status_change(producer, cp_id_autenticado, "ACTIVADO", location, price)
                     print(f"CP '{cp_id_autenticado}' REGISTRADO y ACTIVADO.")
                     conn.send(b"ACK;REGISTER_OK\n")
@@ -224,6 +224,8 @@ def start_socket_server(producer, active_connections, lock):
         client_thread.start()
 
 #kafka
+# EV_Central.py (Reemplazar esta función)
+
 def start_kafka_listener(producer):
     """Inicia el consumidor/productor de Kafka para los Drivers y Engines."""
     consumer = KafkaConsumer(
@@ -242,29 +244,23 @@ def start_kafka_listener(producer):
             if msg.topic == 'topic_requests':
                 cp_id = data['cp_id']
                 driver_id = data['driver_id']
-                # El Driver debe incluir este campo en su petición
-                response_topic = data.get('response_topic') # Ej: "topic_driver_user123"
+                response_topic = data.get('response_topic')
                 
                 print(f" Petición de {driver_id} para {cp_id}")
 
-                # 1. Comprueba BBDD (¿está "ACTIVADO"?)
                 status = get_cp_status_from_db(cp_id)
                 
                 if status == 'ACTIVADO':
-                    # 2. Si OK, actualiza BBDD a "SUMINISTRANDO"
                     update_cp_status_in_db(cp_id, 'SUMINISTRANDO')
                     print(f"OK  Petición APROBADA. Enviando orden a {cp_id}...")
                     
-                    # 3. Envía msg a 'topic_commands_[CP_ID]' para que el ENGINE empiece
                     producer.send(
                         f'topic_commands_{cp_id}',
                         {'action': 'START_CHARGE', 'driver_id': driver_id}
                     )
                     
-                    # 4. Difunde el cambio de estado
                     broadcast_status_change(producer, cp_id, 'SUMINISTRANDO')
                     
-                    # 5. Notificar al driver que fue APROBADO (COMPLETANDO TODO)
                     if response_topic:
                         producer.send(
                             response_topic,
@@ -274,7 +270,6 @@ def start_kafka_listener(producer):
                 else:
                     print(f"  Petición DENEGADA. {cp_id} no está 'ACTIVADO' (estado: {status}).")
                     
-                    # --- COMPLETADO EL TODO ---
                     if response_topic:
                         try:
                             producer.send(
@@ -289,19 +284,17 @@ def start_kafka_listener(producer):
                             producer.flush()
                         except Exception as e:
                             print(f"[KAFKA_ERROR] No se pudo enviar 'DENIED' a {response_topic}: {e}")
-                    # --- FIN DEL TODO ---
 
+            # --- LÓGICA DE FINALIZACIÓN MODIFICADA ---
             elif msg.topic == 'topic_data_streaming':
-                # Escuchamos este topic solo para saber cuándo termina una carga
-                if data.get('status') == 'FINALIZADO':
+                
+                charge_status = data.get('status')
+                
+                # Comprueba si el mensaje es uno de finalización
+                if charge_status in ('FINALIZADO', 'FINALIZADO_AVERIA'):
                     cp_id = data['cp_id']
-                    print(f"✅  Carga finalizada en {cp_id}. Volviendo a ACTIVADO.")
                     
-                    # 1. Actualiza estado del CP en BBDD a "ACTIVADO"
-                    update_cp_status_in_db(cp_id, 'ACTIVADO')
-                    
-                    # --- COMPLETADO EL TODO (Opcional) ---
-                    # 2. Guarda el log final en BBDD
+                    # 1. Guardar el log de la recarga (siempre se guarda)
                     try:
                         conn = get_db_connection()
                         conn.execute(
@@ -312,10 +305,10 @@ def start_kafka_listener(producer):
                             (
                                 cp_id,
                                 data.get('driver_id'),
-                                data.get('start_time'), # EV_CP_E debe enviar esto
-                                data.get('end_time'),   # EV_CP_E debe enviar esto
-                                data.get('total_kwh'),  # EV_CP_E debe enviar esto
-                                data.get('total_euros') # EV_CP_E debe enviar esto
+                                data.get('start_time'),
+                                data.get('end_time'),
+                                data.get('total_kwh'),
+                                data.get('total_euros')
                             )
                         )
                         conn.commit()
@@ -325,16 +318,22 @@ def start_kafka_listener(producer):
                     finally:
                         if conn:
                             conn.close()
-                    # --- FIN DEL TODO ---
+
+                    # 2. Actualizar el estado del CP (depende de cómo finalizó)
+                    if charge_status == 'FINALIZADO':
+                        print(f"✅  Carga finalizada en {cp_id}. Volviendo a ACTIVADO.")
+                        update_cp_status_in_db(cp_id, 'ACTIVADO')
+                        broadcast_status_change(producer, cp_id, 'ACTIVADO')
                     
-                    # 3. Difunde el cambio de estado
-                    broadcast_status_change(producer, cp_id, 'ACTIVADO')
-                    
+                    elif charge_status == 'FINALIZADO_AVERIA':
+                        print(f"❌  Carga interrumpida por avería en {cp_id}. El CP permanece AVERIADO.")
+                        # No hacemos nada, el CP ya fue marcado como 'AVERIADO' por el Monitor
+                        # y debe quedarse así.
+
         except json.JSONDecodeError:
             print(f"[KAFKA_ERROR] Mensaje malformado: {msg.value}")
         except Exception as e:
             print(f"[KAFKA_ERROR] Error procesando mensaje: {e}")
-
 
 def central_command_input(producer, active_connections, lock):
     """Hilo que escucha comandos del admin en la terminal de Central."""
@@ -552,7 +551,7 @@ if __name__ == "__main__":
     print("Iniciando Dashboard... (Presiona Ctrl+C para salir)")
     time.sleep(1)  # Dar tiempo a que los hilos arranquen
 
-    with Live(generate_dashboard(), refresh_per_second=1, screen=True) as live:
+    with Live(generate_dashboard(), refresh_per_second=1, screen=False) as live:
         try:
             while True:
                 time.sleep(1)

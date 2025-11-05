@@ -38,47 +38,64 @@ def simulate_charging(driver_id, cp_id):
     """
     print(f"🔌  Iniciando recarga para {driver_id} en {cp_id}...")
     
-    # Simulación de una recarga de 10 segundos
     start_time = time.strftime('%Y-%m-%d %H:%M:%S')
     total_kwh = 0
     total_euros = 0
+    price_kwh = 0.50 # Asumimos un precio fijo
     
-    # Asumimos un precio fijo (la Central lo sabe, pero lo simulamos aquí)
-    price_kwh = 0.50 
+    # --- LÓGICA DE INTERRUPCIÓN AÑADIDA ---
+    charge_interrupted = False
     
-    for i in range(10):
-        time.sleep(1)
-        kwh_this_second = 0.5 # Simula 0.5 kWh por segundo
+    for i in range(10): # Simulación de 10 segundos
+        
+        # 1. Comprobar la salud ANTES de cargar
+        with health_lock:
+            if not is_healthy: #
+                print(f"\n[{cp_id}] 🚨 ¡AVERÍA DETECTADA! Finalizando suministro...")
+                charge_interrupted = True
+                break # Rompe el bucle de carga
+        
+        # Si todo va bien, simula 1 segundo de carga
+        time.sleep(1) #
+        kwh_this_second = 0.5 #
         total_kwh += kwh_this_second
         total_euros += kwh_this_second * price_kwh
         
         telemetry_data = {
             'cp_id': cp_id,
             'driver_id': driver_id,
-            'status': 'SUMINISTRANDO',
+            'status': 'SUMINISTRANDO', #
             'kwh': round(total_kwh, 2),
             'euros': round(total_euros, 2),
             'timestamp': time.strftime('%Y-%m-%d %H:%M:%S')
         }
         
-        # Enviar telemetría a Central y al Driver
-        send_kafka_message('topic_data_streaming', telemetry_data)
+        send_kafka_message('topic_data_streaming', telemetry_data) #
         print(f"  -> {total_kwh:.2f} kWh | {total_euros:.2f} €")
 
     end_time = time.strftime('%Y-%m-%d %H:%M:%S')
-    print(f"✅  Recarga finalizada para {driver_id}.")
     
-    # Enviar mensaje de finalización
+    # 2. Determinar el estado final
+    final_status = 'FINALIZADO_AVERIA' if charge_interrupted else 'FINALIZADO' #
+    
+    if charge_interrupted:
+        print(f"❌  Recarga INTERRUMPIDA POR AVERÍA para {driver_id}.")
+    else:
+        print(f"✅  Recarga finalizada para {driver_id}.") #
+    
+    # 3. Enviar el "ticket" final con el estado correcto
     final_data = {
         'cp_id': cp_id,
         'driver_id': driver_id,
-        'status': 'FINALIZADO',
+        'status': final_status, # <--- ESTADO MODIFICADO
         'start_time': start_time,
         'end_time': end_time,
-        'total_kwh': round(total_kwh, 2),
-        'total_euros': round(total_euros, 2)
+        'total_kwh': round(total_kwh, 2), #
+        'total_euros': round(total_euros, 2) #
     }
-    send_kafka_message('topic_data_streaming', final_data)
+    send_kafka_message('topic_data_streaming', final_data) #
+
+# (El resto de EV_CP_E.py se queda igual)
 
 def start_kafka_listener(cp_id, kafka_broker):
     """
