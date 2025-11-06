@@ -1,10 +1,17 @@
+"""
+Módulo central_gui.py
+Contiene la clase CentralApp (la ventana principal de Tkinter) y el 
+widget CPPanel (cada panel individual de la rejilla).
+
+Este módulo está diseñado para ser importado por EV_Central.py.
+"""
+
 import tkinter as tk
 from tkinter import ttk
 from tkinter import font
 import queue  # Importante para la comunicación thread-safe
 
 # --- Constantes de Estilo (Basadas en el PDF) ---
-[cite_start]# [cite: 84-100]
 COLOR_VERDE = "#4CAF50"      # Activado / Suministrando
 COLOR_NARANJA = "#FF9800"   # Parado (Out of Order)
 COLOR_ROJO = "#F44336"      # Averiado
@@ -38,7 +45,7 @@ class CPPanel(tk.Frame):
         
         self.widgets = [self, self.lbl_id, self.lbl_location, self.lbl_price, self.lbl_status]
         
-        # [cite_start]Estado inicial Desconectado [cite: 169]
+        # Estado inicial Desconectado
         self.update_state("DESCONECTADO")
 
     def _set_colors(self, color):
@@ -52,11 +59,11 @@ class CPPanel(tk.Frame):
         'data' es un dict para el estado 'SUMINISTRANDO'.
         """
         try:
-            [cite_start]if state == "ACTIVADO": # [cite: 84-85]
+            if state == "ACTIVADO":
                 self._set_colors(COLOR_VERDE)
                 self.lbl_status.configure(text="")
                 
-            [cite_start]elif state == "SUMINISTRANDO": # [cite: 87-91]
+            elif state == "SUMINISTRANDO":
                 self._set_colors(COLOR_VERDE)
                 if data:
                     status_text = (
@@ -66,15 +73,15 @@ class CPPanel(tk.Frame):
                     )
                     self.lbl_status.configure(text=status_text)
                 
-            [cite_start]elif state == "PARADO": # [cite: 85-86]
+            elif state == "PARADO":
                 self._set_colors(COLOR_NARANJA)
                 self.lbl_status.configure(text="Out of Order")
                 
-            [cite_start]elif state == "AVERIADO": # [cite: 98-99]
+            elif state == "AVERIADO":
                 self._set_colors(COLOR_ROJO)
                 self.lbl_status.configure(text="")
                 
-            [cite_start]elif state == "DESCONECTADO": # [cite: 99-100]
+            elif state == "DESCONECTADO":
                 self._set_colors(COLOR_GRIS)
                 self.lbl_status.configure(text="")
                 
@@ -90,7 +97,7 @@ class CentralApp(tk.Tk):
     """
     def __init__(self, gui_queue):
         super().__init__()
-        [cite_start]self.title("SD EV CHARGING SOLUTION. MONITORIZATION PANEL") # [cite: 101]
+        self.title("SD EV CHARGING SOLUTION. MONITORIZATION PANEL")
         self.geometry("1000x700")
         self.configure(bg="#212121")
 
@@ -119,7 +126,7 @@ class CentralApp(tk.Tk):
         title_font = font.Font(family="Arial", size=16, weight="bold")
         lbl_title = tk.Label(
             self, 
-            text="*** SD EV CHARGING SOLUTION. [cite_start]MONITORIZATION PANEL ***", # [cite: 101]
+            text="*** SD EV CHARGING SOLUTION. MONITORIZATION PANEL ***",
             bg="#0D47A1", 
             fg="white", 
             pady=10,
@@ -141,28 +148,26 @@ class CentralApp(tk.Tk):
         bottom_pane.rowconfigure(0, weight=1)
         bottom_pane.rowconfigure(1, weight=1)
 
-        # --- 3a. [cite_start]Panel de Peticiones (On-Going Requests) --- [cite: 125]
+        # --- 3a. Panel de Peticiones (On-Going Requests) ---
         requests_frame = self._create_requests_panel(bottom_pane)
         requests_frame.grid(row=0, column=0, sticky="nsew", padx=10, pady=(0, 5))
 
-        # --- 3b. [cite_start]Panel de Mensajes de Aplicación --- [cite: 139]
+        # --- 3b. Panel de Mensajes de Aplicación ---
         messages_frame = self._create_messages_panel(bottom_pane)
         messages_frame.grid(row=1, column=0, sticky="nsew", padx=10, pady=(5, 0))
 
-        # [cite_start]--- 4. Panel de Administrador (Botones Parar/Reanudar) --- [cite: 198-200]
+        # --- 4. Panel de Administrador (Botones Parar/Reanudar) ---
         admin_frame = self._create_admin_panel(self)
         admin_frame.pack(fill="x", side="bottom", pady=10, padx=10)
 
     def _create_requests_panel(self, parent):
         req_frame = tk.LabelFrame(
             parent, 
-            [cite_start]text=" *** ON_GOING DRIVERS REQUESTS *** ", # [cite: 125]
+            text=" *** ON_GOING DRIVERS REQUESTS *** ", 
             fg="white", 
             bg="#333333",
             font=("Arial", 11, "bold")
-        )
-        req_frame.pack(fill="both", expand=True)
-        
+        )        
         style = ttk.Style(self)
         style.theme_use("clam")
         style.configure("Treeview", 
@@ -176,7 +181,7 @@ class CentralApp(tk.Tk):
                         foreground="white", 
                         font=("Arial", 10, "bold"))
 
-        # [cite_start]Columnas de la tabla [cite: 124, 126, 127]
+        # Columnas de la tabla
         cols = ('DATE', 'START TIME', 'User ID', 'CP')
         self.requests_tree = ttk.Treeview(req_frame, columns=cols, show='headings')
         
@@ -190,12 +195,11 @@ class CentralApp(tk.Tk):
     def _create_messages_panel(self, parent):
         msg_frame = tk.LabelFrame(
             parent, 
-            [cite_start]text=" *** APLICATION MESSAGES *** ", # [cite: 139]
+            text=" *** APLICATION MESSAGES *** ", 
             fg="white", 
             bg="#333333",
             font=("Arial", 11, "bold")
         )
-        msg_frame.pack(fill="both", expand=True)
         
         self.messages_listbox = tk.Listbox(
             msg_frame, 
@@ -216,10 +220,10 @@ class CentralApp(tk.Tk):
         self.admin_cp_entry = tk.Entry(admin_frame, width=10)
         self.admin_cp_entry.pack(side="left", padx=5)
         
-        [cite_start]btn_parar = tk.Button(admin_frame, text="Parar CP", bg=COLOR_NARANJA, fg="white", command=self._on_parar_cp) # [cite: 199]
+        btn_parar = tk.Button(admin_frame, text="Parar CP", bg=COLOR_NARANJA, fg="white", command=self._on_parar_cp)
         btn_parar.pack(side="left", padx=5)
         
-        [cite_start]btn_reanudar = tk.Button(admin_frame, text="Reanudar CP", bg=COLOR_VERDE, fg="white", command=self._on_reanudar_cp) # [cite: 200]
+        btn_reanudar = tk.Button(admin_frame, text="Reanudar CP", bg=COLOR_VERDE, fg="white", command=self._on_reanudar_cp)
         btn_reanudar.pack(side="left", padx=5)
         
         return admin_frame
@@ -227,7 +231,7 @@ class CentralApp(tk.Tk):
     def load_initial_cps(self, cp_list):
         """
         Puebla la rejilla con los CPs cargados desde la BBDD.
-        [cite_start]EV_Central.py debe llamar a este método al arrancar. [cite: 167]
+        EV_Central.py debe llamar a este método al arrancar.
         
         'cp_list' debe ser una lista de dicts.
         Ej: [{"id": "ALC1", "loc": "C/Italia 5", "price": "0,54€/kWh", "grid_row": 0, "grid_col": 0}, ...]
@@ -248,7 +252,7 @@ class CentralApp(tk.Tk):
             )
             # Guardamos la referencia al panel
             self.cp_panels[cp_data["id"]] = panel
-            # [cite_start]El estado por defecto del panel es "DESCONECTADO" [cite: 169]
+            # El estado por defecto del panel es "DESCONECTADO"
 
     # --- Métodos de Actualización de la GUI (Llamados por _process_queue) ---
     
@@ -279,7 +283,7 @@ class CentralApp(tk.Tk):
         if self.backend_controller:
             # Llama al método correspondiente en EV_Central.py
             self.backend_controller.request_parar_cp(cp_id)
-            self._add_app_message(f"Enviando orden PARAR a {cp_id}...")
+            # self._add_app_message(f"Enviando orden PARAR a {cp_id}...")
         else:
             self._add_app_message("ERROR: Backend controller no está conectado.")
 
@@ -292,7 +296,7 @@ class CentralApp(tk.Tk):
         if self.backend_controller:
             # Llama al método correspondiente en EV_Central.py
             self.backend_controller.request_reanudar_cp(cp_id)
-            self._add_app_message(f"Enviando orden REANUDAR a {cp_id}...")
+            # self._add_app_message(f"Enviando orden REANUDAR a {cp_id}...")
         else:
             self._add_app_message("ERROR: Backend controller no está conectado.")
         
@@ -360,35 +364,35 @@ if __name__ == "__main__":
         def start_simulation(self):
             """Simula eventos del backend."""
             time.sleep(2)
-            [cite_start]self.gui_queue.put(("ADD_MESSAGE", "CENTRAL system status OK")) # [cite: 142]
+            self.gui_queue.put(("ADD_MESSAGE", "CENTRAL system status OK"))
             
             time.sleep(1)
-            # [cite_start]Simular peticiones de Figura 1 [cite: 128-138]
+            # Simular peticiones
             self.gui_queue.put(("ADD_REQUEST", "12/9/25", "10:58", "5", "MAD2"))
             self.gui_queue.put(("ADD_REQUEST", "12/9/25", "9:00", "23", "SEV3"))
             self.gui_queue.put(("ADD_REQUEST", "12/9/25", "9:05", "234", "COR1"))
             
             time.sleep(1)
-            # Simular estados de CPs de Figura 1
-            [cite_start]self.gui_queue.put(("UPDATE_CP", "ALC1", "ACTIVADO", None)) # [cite: 102]
-            [cite_start]self.gui_queue.put(("UPDATE_CP", "ALC3", "PARADO", None)) # [cite: 103, 140]
+            # Simular estados de CPs
+            self.gui_queue.put(("UPDATE_CP", "ALC1", "ACTIVADO", None))
+            self.gui_queue.put(("UPDATE_CP", "ALC3", "PARADO", None))
             
-            # [cite_start]Suministrando en MAD2 [cite: 104, 106]
+            # Suministrando en MAD2
             data_mad2 = {"driver": "5", "kwh": "10.3", "eur": "6.18"}
             self.gui_queue.put(("UPDATE_CP", "MAD2", "SUMINISTRANDO", data_mad2))
             
-            [cite_start]self.gui_queue.put(("UPDATE_CP", "MAD3", "AVERIADO", None)) # [cite: 104]
-            [cite_start]self.gui_queue.put(("UPDATE_CP", "MAD1", "DESCONECTADO", None)) # [cite: 105]
+            self.gui_queue.put(("UPDATE_CP", "MAD3", "AVERIADO", None))
+            self.gui_queue.put(("UPDATE_CP", "MAD1", "DESCONECTADO", None))
             
-            # [cite_start]Suministrando en SEV3 [cite: 113, 116, 121-123]
+            # Suministrando en SEV3
             data_sev3 = {"driver": "24", "kwh": "50", "eur": "27"}
             self.gui_queue.put(("UPDATE_CP", "SEV3", "SUMINISTRANDO", data_sev3))
             
-            [cite_start]self.gui_queue.put(("UPDATE_CP", "SEV2", "PARADO", None)) # [cite: 114, 117, 120, 141]
-            [cite_start]self.gui_queue.put(("UPDATE_CP", "VALB", "DESCONECTADO", None)) # [cite: 115, 118]
-            [cite_start]self.gui_queue.put(("UPDATE_CP", "VAL1", "ACTIVADO", None)) # [cite: 107, 108]
+            self.gui_queue.put(("UPDATE_CP", "SEV2", "PARADO", None))
+            self.gui_queue.put(("UPDATE_CP", "VALB", "DESCONECTADO", None))
+            self.gui_queue.put(("UPDATE_CP", "VAL1", "ACTIVADO", None))
             
-            # [cite_start]Suministrando en COR1 [cite: 109, 110, 111, 112]
+            # Suministrando en COR1
             data_cor1 = {"driver": "234", "kwh": "20", "eur": "8"}
             self.gui_queue.put(("UPDATE_CP", "COR1", "SUMINISTRANDO", data_cor1))
 
