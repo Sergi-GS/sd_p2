@@ -1,0 +1,78 @@
+# docker-compose-cps.yml
+version: '3.8'
+
+services:
+  # --- CP 1 (ALC1) ---
+  cp1_engine:
+    image: evcharging-app:latest
+    container_name: cp_engine_alc1
+    command: >
+      py /app/ev_cp/EV_CP_E.py
+      --socket-port 6001
+      --kafka-broker 192.168.1.102 # <-- IP de PC 2
+    ports:
+      - "6001:6001"
+
+  cp1_monitor:
+    image: evcharging-app:latest
+    container_name: cp_monitor_alc1
+    depends_on: [cp1_engine]
+    command: >
+      py /app/ev_cp/EV_CP_M.py
+      --cp-id ALC1
+      --central-ip 192.168.1.102    # <-- IP de PC 2
+      --central-port 8000
+      --engine-ip 192.168.1.103     # <-- IP de PC 3
+      --engine-port 6001
+
+  # --- CP 2 (MAD1) ---
+  cp2_engine:
+    image: evcharging-app:latest
+    container_name: cp_engine_mad1
+    command: >
+      py /app/ev_cp/EV_CP_E.py
+      --socket-port 6002
+      --kafka-broker 192.168.1.102
+    ports:
+      - "6002:6002"
+
+  cp2_monitor:
+    image: evcharging-app:latest
+    container_name: cp_monitor_mad1
+    depends_on: [cp2_engine]
+    command: >
+      py /app/ev_cp/EV_CP_M.py
+      --cp-id MAD1
+      --central-ip 192.168.1.102
+      --central-port 8000
+      --engine-ip 192.168.1.103
+      --engine-port 6002
+
+  # --- CP 3 (BCN1) ---
+  cp3_engine:
+    image: evcharging-app:latest
+    container_name: cp_engine_bcn1
+    command: >
+      py /app/ev_cp/EV_CP_E.py
+      --socket-port 6003
+      --kafka-broker 192.168.1.102
+    ports:
+      - "6003:6003"
+
+  cp3_monitor:
+    image: evcharging-app:latest
+    container_name: cp_monitor_bcn1
+    depends_on: [cp3_engine]
+    command: >
+      py /app/ev_cp/EV_CP_M.py
+      --cp-id BCN1
+      --central-ip 192.168.1.102
+      --central-port 8000
+      --engine-ip 192.168.1.103
+      --engine-port 6003
+  
+  # --- CP 4 (SEV1) ---
+  # (Copias el bloque de CP 3 y cambias los números/IDs)
+  
+  # --- CP 5 (VAL1) ---
+  # (etc...)
