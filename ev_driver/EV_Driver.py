@@ -3,213 +3,329 @@ import sys
 import time
 import json
 import threading
-import argparse
+import queue
 import os
+import socket # Para el historial
 from kafka import KafkaConsumer, KafkaProducer
+from tkinter import messagebox
 
-# Evento de sincronización para saber cuándo un servicio ha terminado
-service_finished_event = threading.Event()
-current_driver_id = None
+# Importa la GUI que ya teníamos
+from driver_gui import DriverApp
 
-# --- Variables Globales para Sincronización ---
-active_cp_id = None  # El CP que estamos procesando AHORA
-state_lock = threading.Lock() # Un lock para proteger 'active_cp_id'
+class BackendController:
+    """Maneja toda la lógica de Kafka (productor, consumidor, bucles) en hilos."""
+    
+    def __init__(self, gui_queue):
+        self.gui_queue = gui_queue
+        self.producer = None
+        self.driver_id = None
+        self.response_topic = None
+        self.kafka_broker = None
+        
+        self.active_cp_id = None
+        self.state_lock = threading.Lock()
+        self.state_file = None
+        self.service_finished_event = threading.Event()
 
-def start_kafka_listener(driver_id, kafka_broker, response_topic):
-    """
-    Inicia el consumidor en un hilo separado.
-    """
-    global service_finished_event, active_cp_id, state_lock
-    try:
-        consumer = KafkaConsumer(
-            response_topic,
-            'topic_data_streaming',
-            bootstrap_servers=kafka_broker,
-            value_deserializer=lambda m: json.loads(m.decode('utf-8')),
-            group_id=f'driver_group_{driver_id}',
-            auto_offset_reset='latest'
+    def connect(self, driver_id, broker):
+        """
+        Llamado por la GUI. Inicializa el productor y lanza los hilos de backend.
+        """
+        self.driver_id = driver_id
+        self.kafka_broker = broker
+        self.response_topic = f'topic_driver_{self.driver_id}'
+        self.state_file = f"driver_state_{self.driver_id}.json"
+        
+        try:
+            self.producer = KafkaProducer(
+                bootstrap_servers=self.kafka_broker,
+                value_serializer=lambda v: json.dumps(v).encode('utf-8')
+            )
+            self.gui_queue.put(("ADD_MESSAGE", "Productor Kafka OK."))
+        except Exception as e:
+            self.gui_queue.put(("ADD_MESSAGE", f"❌ Error conectando Productor: {e}"))
+            return
+
+        # 1. Pedir historial (en un hilo)
+        history_thread = threading.Thread(
+            target=self._fetch_offline_history,
+            daemon=True
         )
-        print(f"[{driver_id}] Oyente de Kafka conectado. Esperando mensajes...")
+        history_thread.start()
 
-        for msg in consumer:
-            data = msg.value
-            msg_cp_id = data.get('cp_id')
-
-            # --- LÓGICA DE SINCRONIZACIÓN ---
-            with state_lock:
-                if msg_cp_id != active_cp_id:
-                    continue
-            # --- FIN LÓGICA ---
+        # 2. Iniciar el hilo Consumidor (como antes)
+        consumer_thread = threading.Thread(
+            target=self._start_kafka_listener,
+            daemon=True
+        )
+        consumer_thread.start()
+        time.sleep(1) 
+        
+    def _fetch_offline_history(self):
+        """
+        Se conecta por socket a Central (puerto 8000) para pedir el historial.
+        """
+        self.gui_queue.put(("ADD_MESSAGE", "Comprobando historial de recargas..."))
+        try:
+            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            central_host = self.kafka_broker.split(':')[0]
+            sock.connect((central_host, 8000)) # Puerto 8000 de EV_Central
             
-            if msg.topic == response_topic:
-                status = data.get('status')
-                if status == 'APPROVED':
-                    print(f"\n[{driver_id}] ✅ SOLICITUD APROBADA para {data.get('cp_id')}.")
-                    print(f"[{driver_id}] ...Esperando inicio de telemetría...")
-                
-                elif status == 'DENIED':
-                    print(f"\n[{driver_id}] ❌ SOLICITUD DENEGADA para {data.get('cp_id')}.")
-                    print(f"[{driver_id}] Razón: {data.get('reason')}")
-                    with state_lock:
-                        active_cp_id = None
-                    service_finished_event.set() 
+            request_msg = f"GET_HISTORY;{self.driver_id}\n"
+            sock.sendall(request_msg.encode('utf-8'))
+            
+            response_data = b""
+            while True:
+                chunk = sock.recv(4096)
+                if not chunk:
+                    break
+                response_data += chunk
+            
+            sock.close()
 
-            elif msg.topic == 'topic_data_streaming':
-                if data.get('driver_id') != driver_id:
-                    continue 
-                
-                status = data.get('status')
-                
-                if status == 'SUMINISTRANDO':
-                    print(f"\r[{driver_id}] 🔌 Recargando... {data.get('kwh'):.2f} kWh | {data.get('euros'):.2f} €", end="")
-                
-                # --- LÓGICA DE FINALIZACIÓN MODIFICADA ---
-                elif status in ('FINALIZADO', 'FINALIZADO_AVERIA', 'FINALIZADO_PARADA'):
-                    if status == 'FINALIZADO':
-                        print(f"\n[{driver_id}] ✅ Recarga FINALIZADA.")
-                    elif status == 'FINALIZADO_AVERIA':
-                        print(f"\n[{driver_id}] ❌ Recarga INTERRUMPIDA POR AVERÍA.")
-                    elif status == 'FINALIZADO_PARADA':
-                        print(f"\n[{driver_id}] 🛑 Recarga PARADA por la Central.")
+            logs = json.loads(response_data.decode('utf-8'))
+            if logs:
+                self.gui_queue.put(("ADD_MESSAGE", f"--- {len(logs)} Recarga(s) Offline Recuperada(s) ---"))
+                for log in logs:
+                    self.gui_queue.put(("ADD_MESSAGE", f"  CP: {log['cp_id']}"))
+                    self.gui_queue.put(("ADD_MESSAGE", f"  Total: {log.get('total_kwh', 0):.2f} kWh | {log.get('total_euros', 0):.2f} €"))
+                    self.gui_queue.put(("ADD_MESSAGE", f"  Terminada: {log['end_time']}"))
+                    self.gui_queue.put(("ADD_MESSAGE", "--------------------"))
+            else:
+                self.gui_queue.put(("ADD_MESSAGE", "No hay recargas offline pendientes."))
+
+        except Exception as e:
+            self.gui_queue.put(("ADD_MESSAGE", f"❌ Error recuperando historial: {e}"))
+            print(f"Error recuperando historial: {e}")
+            
+    def _start_kafka_listener(self):
+        """
+        Inicia el consumidor. Escucha en 3 tópicos.
+        (Lógica de Sergi integrada)
+        """
+        try:
+            # --- INICIO DE LA CORRECCIÓN ---
+            consumer = KafkaConsumer(
+                self.response_topic,        # Tópico de respuesta de Central
+                'topic_data_streaming',   # Tópico de telemetría de los Engines
+                'topic_status_broadcast', # Tópico de estado de TODOS los CPs
+                bootstrap_servers=self.kafka_broker,
+                value_deserializer=lambda m: json.loads(m.decode('utf-8')),
+                # ¡LÍNEA 'group_id' ELIMINADA!
+                auto_offset_reset='latest'
+            )
+            # --- FIN DE LA CORRECCIÓN ---
+            
+            self.gui_queue.put(("ADD_MESSAGE", "Oyente Kafka OK. Escuchando..."))
+
+            for msg in consumer:
+                data = msg.value
+                msg_cp_id = data.get('cp_id')
+
+                # --- LÓGICA DE SINCRONIZACIÓN DE SERGI ---
+                with self.state_lock:
+                    # Ignorar mensajes que no sean para el CP que estamos esperando
+                    # PERO siempre aceptar los mensajes de 'broadcast'
+                    if msg.topic != 'topic_status_broadcast' and msg_cp_id != self.active_cp_id:
+                        continue
+                # --- FIN LÓGICA ---
+            
+                # --- Tópico 1: Respuesta de Central (Aprobado/Denegado) ---
+                if msg.topic == self.response_topic:
+                    status = data.get('status')
+                    if status == 'APPROVED':
+                        msg_txt = f"✅ SOLICITUD APROBADA para {data.get('cp_id')}"
+                        self.gui_queue.put(("ADD_MESSAGE", msg_txt))
+                        self.gui_queue.put(("ADD_MESSAGE", "...Esperando telemetría..."))
                     
-                    print(f"    Total: {data.get('total_kwh'):.2f} kWh")
-                    print(f"    Coste: {data.get('total_euros'):.2f} €")
+                    elif status == 'DENIED':
+                        msg_txt = f"❌ SOLICITUD DENEGADA para {data.get('cp_id')}"
+                        self.gui_queue.put(("ADD_MESSAGE", msg_txt))
+                        self.gui_queue.put(("ADD_MESSAGE", f"   Razón: {data.get('reason')}"))
+                        with self.state_lock:
+                            self.active_cp_id = None
+                        self.service_finished_event.set() 
+
+                # --- Tópico 2: Telemetría del Engine (Suministro/Finalizado) ---
+                elif msg.topic == 'topic_data_streaming':
+                    if data.get('driver_id') != self.driver_id:
+                        continue
                     
-                    with state_lock:
-                        active_cp_id = None
-                    service_finished_event.set()
-                # --- FIN LÓGICA MODIFICADA ---
+                    status = data.get('status')
+                    
+                    if status == 'SUMINISTRANDO':
+                        self.gui_queue.put(("UPDATE_CHARGE", data))
+                    
+                    elif status in ('FINALIZADO', 'FINALIZADO_AVERIA', 'FINALIZADO_PARADA'):
+                        self.gui_queue.put(("ADD_MESSAGE", "\n" + "="*20))
+                        if status == 'FINALIZADO':
+                            self.gui_queue.put(("ADD_MESSAGE", f"✅ Recarga FINALIZADA."))
+                        elif status == 'FINALIZADO_AVERIA':
+                            self.gui_queue.put(("ADD_MESSAGE", f"❌ Recarga INTERRUMPIDA POR AVERÍA."))
+                        elif status == 'FINALIZADO_PARADA':
+                             self.gui_queue.put(("ADD_MESSAGE", f"🛑 Recarga PARADA por la Central."))
+                        
+                        self.gui_queue.put(("ADD_MESSAGE", f"   Total: {data.get('total_kwh'):.2f} kWh"))
+                        self.gui_queue.put(("ADD_MESSAGE", f"   Coste: {data.get('total_euros'):.2f} €"))
+                        self.gui_queue.put(("ADD_MESSAGE", "="*20 + "\n"))
+                        
+                        self.gui_queue.put(("RESET_CHARGE", None))
+                        with self.state_lock:
+                            self.active_cp_id = None
+                        self.service_finished_event.set()
+                
+                # --- Tópico 3: Estado de TODOS los CPs (para la lista) ---
+                elif msg.topic == 'topic_status_broadcast':
+                    self.gui_queue.put(("UPDATE_CP_LIST", data))
 
-    except Exception as e:
-        print(f"[{driver_id}] ❌ Error fatal en el oyente de Kafka: {e}")
+        except Exception as e:
+            self.gui_queue.put(("ADD_MESSAGE", f"❌ Error fatal en oyente Kafka: {e}"))
+            
+    def _send_request(self, cp_id):
+        """Función helper para enviar la solicitud de carga."""
+        if not self.producer:
+            self.gui_queue.put(("ADD_MESSAGE", "Error: Productor no conectado."))
+            return
+        
+        with self.state_lock:
+            self.active_cp_id = cp_id
+            
+        request_payload = {
+            'driver_id': self.driver_id,
+            'cp_id': cp_id,
+            'response_topic': self.response_topic
+        }
+        
+        try:
+            self.producer.send('topic_requests', request_payload)
+            self.producer.flush()
+            self.gui_queue.put(("ADD_MESSAGE", f"[{self.driver_id}] Solicitud para {cp_id} enviada..."))
+        except Exception as e:
+            self.gui_queue.put(("ADD_MESSAGE", f"❌ Error enviando solicitud: {e}"))
+            with self.state_lock:
+                self.active_cp_id = None
+            
+    # --- Funciones llamadas por la GUI ---
+    
+    def request_manual_service(self, cp_id):
+        """Solicita una única carga manual."""
+        self.gui_queue.put(("ADD_MESSAGE", "\n--- Nueva Petición Manual ---"))
+        
+        with self.state_lock:
+            if self.active_cp_id is not None:
+                self.gui_queue.put(("ADD_MESSAGE", f"Error: Ya hay una carga en curso en {self.active_cp_id}."))
+                return
+        
+        self._send_request(cp_id)
+        
+    def start_file_services(self, file_path):
+        """Inicia el bucle de servicios de archivo en un nuevo hilo."""
+        self.gui_queue.put(("ADD_MESSAGE", f"Iniciando servicios desde: {file_path}"))
+        file_thread = threading.Thread(
+            target=self._run_file_loop,
+            args=(file_path,),
+            daemon=True
+        )
+        file_thread.start()
 
-def read_services_file(file_path):
-    """Lee el archivo de servicios y devuelve una lista de CP_IDs."""
+    # --- Lógica de Estado (de Sergi) ---
+    def _load_driver_state(self):
+        """Carga el índice del último servicio completado."""
+        if not os.path.exists(self.state_file):
+            return 0
+        try:
+            with open(self.state_file, 'r') as f:
+                state = json.load(f)
+                return state.get('next_service_index', 0)
+        except Exception as e:
+            self.gui_queue.put(("ADD_MESSAGE", f"Advertencia: No se pudo leer estado. Empezando de cero. ({e})"))
+            return 0
+
+    def _save_driver_state(self, next_index):
+        """Guarda el índice del PRÓXIMO servicio a ejecutar."""
+        try:
+            with open(self.state_file, 'w') as f:
+                json.dump({'next_service_index': next_index}, f)
+        except Exception as e:
+            self.gui_queue.put(("ADD_MESSAGE", f"❌ Error CRÍTICO: No se pudo guardar el estado."))
+            
+    def _clear_driver_state(self):
+        if os.path.exists(self.state_file):
+            os.remove(self.state_file)
+
+
+    def _run_file_loop(self, file_path):
+        """
+        El bucle que lee el archivo y procesa los servicios uno por uno.
+        """
+        try:
+            with open(file_path, 'r') as f:
+                services = [line.strip() for line in f if line.strip()]
+            self.gui_queue.put(("ADD_MESSAGE", f"Servicios a solicitar: {services}"))
+        except Exception as e:
+            self.gui_queue.put(("ADD_MESSAGE", f"❌ Error leyendo archivo: {e}"))
+            return
+            
+        if not services:
+            self.gui_queue.put(("ADD_MESSAGE", "Archivo de servicios vacío."))
+            return
+            
+        start_index = self._load_driver_state()
+        total_services = len(services)
+        
+        if start_index >= total_services:
+            self.gui_queue.put(("ADD_MESSAGE", "Todos los servicios ya estaban completados. Limpiando estado."))
+            self._clear_driver_state()
+            return
+        elif start_index > 0:
+            self.gui_queue.put(("ADD_MESSAGE", f"Reanudando desde el servicio {start_index + 1} de {total_services}..."))
+
+        for i in range(start_index, total_services):
+            cp_id = services[i]
+            
+            with self.state_lock:
+                if self.active_cp_id == cp_id:
+                    self.gui_queue.put(("ADD_MESSAGE", f"Ya hay una carga activa en {cp_id}, esperando a que termine..."))
+                else:
+                    self.gui_queue.put(("ADD_MESSAGE", "\n" + "="*30))
+                    self.gui_queue.put(("ADD_MESSAGE", f"[{self.driver_id}] Solicitando servicio {i+1}/{total_services} en: {cp_id}"))
+                    self._send_request(cp_id)
+            
+            self.service_finished_event.wait()
+            self._save_driver_state(i + 1)
+            self.service_finished_event.clear()
+            
+            self.gui_queue.put(("ADD_MESSAGE", "...Esperando 4 segundos..."))
+            time.sleep(4)
+        
+        self.gui_queue.put(("ADD_MESSAGE", "\n" + "="*30))
+        self.gui_queue.put(("ADD_MESSAGE", "Todos los servicios del archivo han sido procesados."))
+        self._clear_driver_state()
+
+    def close_producer(self):
+        if self.producer:
+            self.producer.close()
+            print("Productor de Kafka cerrado.")
+
+# --- Punto de Entrada Principal ---
+def main():
+    gui_queue = queue.Queue()
+    app = DriverApp(gui_queue)
+    backend = BackendController(gui_queue)
+    app.set_controller(backend)
+    
+    def on_closing():
+        if messagebox.askokcancel("Salir", "¿Seguro que quieres salir?"):
+            backend.close_producer()
+            app.destroy()
+            
+    app.protocol("WM_DELETE_WINDOW", on_closing)
+    
     try:
-        with open(file_path, 'r') as f:
-            services = [line.strip() for line in f if line.strip()]
-            print(f"Servicios a solicitar: {services}")
-            return services
-    except FileNotFoundError:
-        print(f"❌ Error: No se encontró el archivo de servicios en {file_path}")
-        return []
-    except Exception as e:
-        print(f"❌ Error leyendo el archivo de servicios: {e}")
-        return []
-
-def load_driver_state(state_file):
-    """Carga el índice del último servicio completado."""
-    if not os.path.exists(state_file):
-        return 0
-    try:
-        with open(state_file, 'r') as f:
-            state = json.load(f)
-            return state.get('next_service_index', 0)
-    except Exception as e:
-        print(f"[{current_driver_id}] Advertencia: No se pudo leer el archivo de estado {state_file}. Empezando de cero. Error: {e}")
-        return 0
-
-def save_driver_state(state_file, next_index):
-    """Guarda el índice del PRÓXIMO servicio a ejecutar."""
-    try:
-        with open(state_file, 'w') as f:
-            json.dump({'next_service_index': next_index}, f)
-    except Exception as e:
-        print(f"[{current_driver_id}] ❌ Error CRÍTICO: No se pudo guardar el estado en {state_file}. Error: {e}")
-
+        app.mainloop()
+    except KeyboardInterrupt:
+        backend.close_producer()
+        app.destroy()
 
 if __name__ == "__main__":
-    
-    parser = argparse.ArgumentParser(description="EV Charging Point - Driver")
-    parser.add_argument('--kafka-broker', required=True, help="IP:Puerto del broker de Kafka")
-    parser.add_argument('--driver-id', required=True, help="ID único de este conductor")
-    parser.add_argument('--file', required=True, help="Archivo .txt con la lista de servicios (CP_IDs)")
-    args = parser.parse_args()
-    
-    current_driver_id = args.driver_id
-    
-    STATE_FILE = f"driver_state_{args.driver_id}.json"
-    start_index = load_driver_state(STATE_FILE)
-    
-    services_to_request = read_services_file(args.file)
-    if not services_to_request:
-        print("No hay servicios que solicitar. Saliendo.")
-        sys.exit(0)
-    
-    total_services = len(services_to_request)
-    if start_index >= total_services:
-        print(f"[{args.driver_id}] Todos los servicios ya estaban completados. Limpiando estado.")
-        if os.path.exists(STATE_FILE):
-            os.remove(STATE_FILE)
-        sys.exit(0)
-    elif start_index > 0:
-        print(f"[{args.driver_id}] Reanudando desde el servicio {start_index + 1} de {total_services}...")
-
-    try:
-        producer = KafkaProducer(
-            bootstrap_servers=args.kafka_broker,
-            value_serializer=lambda v: json.dumps(v).encode('utf-8')
-        )
-    except Exception as e:
-        print(f"❌ Error conectando el Productor de Kafka a {args.kafka_broker}: {e}")
-        sys.exit(1)
-
-    response_topic = f'topic_driver_{args.driver_id}'
-    
-    consumer_thread = threading.Thread(
-        target=start_kafka_listener,
-        args=(args.driver_id, args.kafka_broker, response_topic),
-        daemon=True
-    )
-    consumer_thread.start()
-    
-    time.sleep(1) 
-
-    # --- BUCLE PRINCIPAL CON MANEJO DE CTRL+C ---
-    try:
-        for i in range(start_index, total_services):
-            cp_id = services_to_request[i]
-            
-            print("\n" + "="*30)
-            print(f"[{args.driver_id}] Solicitando servicio {i+1}/{total_services} en: {cp_id}")
-            
-            with state_lock:
-                active_cp_id = cp_id
-            
-            request_payload = {
-                'driver_id': args.driver_id,
-                'cp_id': cp_id,
-                'response_topic': response_topic
-            }
-            
-            try:
-                producer.send('topic_requests', request_payload)
-                producer.flush()
-                print(f"[{args.driver_id}] Solicitud enviada. Esperando...")
-            except Exception as e:
-                print(f"[{args.driver_id}] ❌ Error enviando solicitud a Kafka: {e}")
-                with state_lock:
-                    active_cp_id = None
-                continue 
-
-            service_finished_event.wait()
-            
-            save_driver_state(STATE_FILE, i + 1)
-            
-            service_finished_event.clear()
-            
-            print(f"[{args.driver_id}] ...Esperando 4 segundos antes del siguiente servicio...")
-            time.sleep(4)
-            
-    except KeyboardInterrupt:
-        print(f"\n[{args.driver_id}] Saliendo... (El estado se ha guardado. Próximo servicio: {load_driver_state(STATE_FILE) + 1})")
-        sys.exit(0)
-    # --- FIN BUCLE MODIFICADO ---
-
-    print("\n" + "="*30)
-    print(f"[{args.driver_id}] Todos los servicios del archivo han sido procesados. Saliendo.")
-    
-    if os.path.exists(STATE_FILE):
-        os.remove(STATE_FILE)
-        
-    producer.close()
+    main()
