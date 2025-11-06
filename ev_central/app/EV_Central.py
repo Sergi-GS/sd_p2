@@ -24,7 +24,17 @@ SOCKET_PORT = 8000
 KAFKA_SERVER = 'localhost:9092'
 HEARTBEAT_TIMEOUT = 15
 
-# --- Funciones de BBDD (Sin cambios) ---
+#interfaz grafica en terminal
+STATUS_COLORS = {
+    'ACTIVADO': Style(color="green"),
+    'SUMINISTRANDO': Style(color="green", bold=True), # Este es el "verde oscuro" para el parpadeo
+    'AVERIADO': Style(color="red"),
+    'PARADO': Style(color="yellow"),
+    'DESCONECTADO': Style(color="grey50"),
+}
+
+
+#BDD
 def get_db_connection():
     conn = sqlite3.connect(DB_NAME, check_same_thread=False)
     conn.row_factory = sqlite3.Row
@@ -48,7 +58,11 @@ def update_cp_status_in_db(cp_id, new_status):
             conn.close()
 
 def register_cp_in_db(cp_id, location, price):
-    """Registra o actualiza un CP en la BBDD."""
+    """
+    Registra un CP si no existe.
+    Si ya existe, NO actualiza sus datos (para mantener los manuales),
+    solo actualiza su timestamp.
+    """
     conn = None
     try:
         conn = get_db_connection()
@@ -57,8 +71,8 @@ def register_cp_in_db(cp_id, location, price):
             INSERT INTO ChargingPoints (cp_id, location, price_kwh, status, last_heartbeat, last_update)
             VALUES (?, ?, ?, 'DESCONECTADO', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
             ON CONFLICT(cp_id) DO UPDATE SET
-                location = excluded.location,
-                price_kwh = excluded.price_kwh,
+                -- No actualizamos la ubicación ni el precio,
+                -- ¡mantenemos los que ya estaban en la BBDD!
                 last_update = CURRENT_TIMESTAMP
             """,
             (cp_id, location, price)
@@ -69,7 +83,7 @@ def register_cp_in_db(cp_id, location, price):
     finally:
         if conn:
             conn.close()
-
+            
 def update_cp_heartbeat(cp_id):
     """Actualiza la marca de tiempo 'last_heartbeat' de un CP."""
     conn = None
@@ -86,24 +100,24 @@ def update_cp_heartbeat(cp_id):
         if conn:
             conn.close()
 
-def get_cp_status_from_db(cp_id):
-    """Obtiene el estado actual de un CP."""
+def get_cp_info_from_db(cp_id):
+    """Obtiene el estado y el precio de un CP."""
     conn = None
-    status = None
+    info = {'status': None, 'price_kwh': 0.50} # Precio por defecto si algo falla
     try:
         conn = get_db_connection()
-        cursor = conn.execute("SELECT status FROM ChargingPoints WHERE cp_id = ?", (cp_id,))
+        cursor = conn.execute("SELECT status, price_kwh FROM ChargingPoints WHERE cp_id = ?", (cp_id,))
         result = cursor.fetchone()
         if result:
-            status = result['status']
+            info['status'] = result['status']
+            info['price_kwh'] = result['price_kwh']
     except sqlite3.Error as e:
-        print(f"[DB_ERROR] al leer estado: {e}")
+        print(f"[DB_ERROR] al leer info de CP: {e}")
     finally:
         if conn:
             conn.close()
-    return status
+    return info
 
-# --- Funciones de Kafka/Socket (Sin cambios en lógica, firma modificada) ---
 
 def broadcast_status_change(producer, cp_id, new_status, location=None, price=None):
     payload = {
@@ -125,12 +139,9 @@ def send_socket_message(conn, message_str):
     except (BrokenPipeError, ConnectionResetError):
         print(f"[SOCKET_SEND] Error: La conexión ya estaba cerrada.")
 
-# --- Lógica de Sockets (MODIFICADA para GUI) ---
-def handle_socket_client(conn, addr, producer, active_connections, lock, gui_queue):
-    """
-    Gestiona un cliente (Monitor) de socket.
-    ¡Ahora envía actualizaciones a la 'gui_queue'!
-    """
+
+#sockets
+def handle_socket_client(conn, addr, producer, active_connections, lock):
     print(f"[SOCKET] Nueva conexión del Monitor: {addr}")
     cp_id_autenticado = None
     try:
@@ -152,24 +163,21 @@ def handle_socket_client(conn, addr, producer, active_connections, lock, gui_que
                     location = parts[2]
                     price = float(parts[3])
                     register_cp_in_db(cp_id_autenticado, location, price)
-                    update_cp_status_in_db(cp_id_autenticado, "ACTIVADO") # Inicia ACTIVADO
-                    broadcast_status_change(producer, cp_id_autenticado, "ACTIVADO", location, price)
-                    print(f"CP '{cp_id_autenticado}' REGISTRADO y ACTIVADO.")
+                    # Lo ponemos DESCONECTADO (el Monitor lo activará en 1 seg)
+                    update_cp_status_in_db(cp_id_autenticado, "DESCONECTADO") 
+                    
+                    print(f"CP '{cp_id_autenticado}' REGISTRADO.")
                     conn.send(b"ACK;REGISTER_OK\n")
                     
                     with lock:
                         active_connections[cp_id_autenticado] = conn
-                    
-                    # --- ACTUALIZACIÓN GUI ---
-                    gui_queue.put(("ADD_MESSAGE", f"CP '{cp_id_autenticado}' REGISTRADO y ACTIVADO."))
-                    gui_queue.put(("UPDATE_CP", cp_id_autenticado, "ACTIVADO", None))
                 
                 elif command == 'HEARTBEAT' and cp_id_autenticado:
                     update_cp_heartbeat(cp_id_autenticado)
                     conn.send(b"ACK;HEARTBEAT_OK\n")
                 
                 elif command == 'STATUS' and cp_id_autenticado:
-                    new_status = parts[1]  # Ej: "AVERIADO" o "ACTIVADO"
+                    new_status = parts[1]
                     update_cp_status_in_db(cp_id_autenticado, new_status)
                     broadcast_status_change(producer, cp_id_autenticado, new_status)
                     print(f"📡 Estado de '{cp_id_autenticado}' actualizado a {new_status} por Monitor.")
@@ -196,10 +204,11 @@ def handle_socket_client(conn, addr, producer, active_connections, lock, gui_que
             gui_queue.put(("ADD_MESSAGE", f"CP '{cp_id_autenticado}' DESCONECTADO (Socket cerrado)"))
             gui_queue.put(("UPDATE_CP", cp_id_autenticado, "DESCONECTADO", None))
         
+            
         conn.close()
 
-def start_socket_server(producer, active_connections, lock, gui_queue):
-    """Inicia el servidor de Sockets (pasa la gui_queue a los hilos)."""
+def start_socket_server(producer, active_connections, lock):
+    """Inicia el servidor de Sockets concurrente para los Monitores."""
     server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     server.bind((SOCKET_HOST, SOCKET_PORT))
@@ -216,12 +225,13 @@ def start_socket_server(producer, active_connections, lock, gui_queue):
         )
         client_thread.start()
 
-# --- Lógica de Kafka (MODIFICADA para GUI) ---
-def start_kafka_listener(producer, gui_queue):
-    """Inicia el consumidor/productor de Kafka (envía actualizaciones a la gui_queue)."""
+#kafka
+# --- ESTA ES LA FUNCIÓN CORREGIDA ---
+def start_kafka_listener(producer, telemetry_lock, current_telemetry):
+    """Inicia el consumidor/productor de Kafka para los Drivers y Engines."""
     consumer = KafkaConsumer(
-        'topic_requests',
-        'topic_data_streaming',
+        'topic_requests',        # Peticiones de Drivers
+        'topic_data_streaming',  # Datos de Engines
         bootstrap_servers=KAFKA_SERVER,
         value_deserializer=lambda m: json.loads(m.decode('utf-8')),
         auto_offset_reset='latest'
@@ -233,27 +243,33 @@ def start_kafka_listener(producer, gui_queue):
         try:
             data = msg.value
             
+            # --- SECCIÓN DE 'topic_requests' (CORREGIDA) ---
             if msg.topic == 'topic_requests':
                 cp_id = data['cp_id']
                 driver_id = data['driver_id']
                 response_topic = data.get('response_topic')
                 
-                print(f"Petición de {driver_id} para {cp_id}")
+                print(f" Petición de {driver_id} para {cp_id}")
 
-                # --- ACTUALIZACIÓN GUI (Petición) ---
-                now = datetime.now()
-                gui_queue.put(("ADD_REQUEST", now.strftime("%d/%m/%y"), now.strftime("%H:%M:%S"), driver_id, cp_id))
-
-                status = get_cp_status_from_db(cp_id)
+                # 1. Obtener info (status Y precio) de la BBDD
+                cp_info = get_cp_info_from_db(cp_id)
+                status = cp_info['status']
+                price_kwh = cp_info['price_kwh']
                 
                 if status == 'ACTIVADO':
                     update_cp_status_in_db(cp_id, 'SUMINISTRANDO')
-                    print(f"OK Petición APROBADA. Enviando orden a {cp_id}...")
+                    print(f"OK  Petición APROBADA. Enviando orden a {cp_id} al precio de {price_kwh} €/kWh...")
                     
+                    # 2. Enviar el precio al Engine en el mensaje
                     producer.send(
                         f'topic_commands_{cp_id}',
-                        {'action': 'START_CHARGE', 'driver_id': driver_id}
+                        {
+                            'action': 'START_CHARGE', 
+                            'driver_id': driver_id,
+                            'price_kwh': price_kwh
+                        }
                     )
+                    
                     broadcast_status_change(producer, cp_id, 'SUMINISTRANDO')
                     
                     if response_topic:
@@ -269,46 +285,42 @@ def start_kafka_listener(producer, gui_queue):
                     gui_queue.put(("ADD_MESSAGE", f"Petición de {driver_id} para {cp_id} APROBADA."))
 
                 else:
-                    print(f"Petición DENEGADA. {cp_id} no está 'ACTIVADO' (estado: {status}).")
+                    print(f"  Petición DENEGADA. {cp_id} no está 'ACTIVADO' (estado: {status}).")
                     if response_topic:
                         try:
                             producer.send(
                                 response_topic,
-                                {
-                                    'status': 'DENIED',
-                                    'cp_id': cp_id,
-                                    'driver_id': driver_id,
-                                    'reason': f"CP no disponible. Estado actual: {status}"
-                                }
+                                {'status': 'DENIED', 'cp_id': cp_id, 'driver_id': driver_id, 'reason': f"CP no disponible. Estado actual: {status}"}
                             )
                             producer.flush()
                         except Exception as e:
                             print(f"[KAFKA_ERROR] No se pudo enviar 'DENIED' a {response_topic}: {e}")
-                    
-                    # --- ACTUALIZACIÓN GUI (Denegada) ---
-                    gui_queue.put(("ADD_MESSAGE", f"Petición de {driver_id} para {cp_id} DENEGADA (Estado: {status})"))
+            # --- FIN SECCIÓN 'topic_requests' ---
 
+            # --- SECCIÓN DE 'topic_data_streaming' (CORREGIDA) ---
             elif msg.topic == 'topic_data_streaming':
                 charge_status = data.get('status')
+                cp_id = data.get('cp_id')
                 
-                # --- ACTUALIZACIÓN GUI (Streaming en tiempo real) ---
                 if charge_status == 'SUMINISTRANDO':
-                    cp_id = data['cp_id']
-                    gui_data = {
-                        "driver": data.get('driver_id'),
-                        "kwh": f"{data.get('kwh_actual', 0.0):.1f}",
-                        "eur": f"{data.get('euros_actual', 0.0):.2f}"
-                    }
-                    gui_queue.put(("UPDATE_CP", cp_id, "SUMINISTRANDO", gui_data))
+                    with telemetry_lock:
+                        current_telemetry[cp_id] = {
+                            'kwh': data.get('kwh', 0),
+                            'euros': data.get('euros', 0),
+                            'driver_id': data.get('driver_id', 'N/A')
+                        }
                 
-                elif charge_status in ('FINALIZADO', 'FINALIZADO_AVERIA'):
-                    cp_id = data['cp_id']
+                # AÑADIDO 'FINALIZADO_PARADA'
+                elif charge_status in ('FINALIZADO', 'FINALIZADO_AVERIA', 'FINALIZADO_PARADA'):
                     
-                    # 1. Guardar log (tu lógica original)
+                    # Guardar el log de la recarga
                     try:
                         conn = get_db_connection()
                         conn.execute(
-                            "INSERT INTO ChargeLog (cp_id, driver_id, start_time, end_time, total_kwh, total_euros) VALUES (?, ?, ?, ?, ?, ?)",
+                            """
+                            INSERT INTO ChargeLog (cp_id, driver_id, start_time, end_time, total_kwh, total_euros)
+                            VALUES (?, ?, ?, ?, ?, ?)
+                            """,
                             (cp_id, data.get('driver_id'), data.get('start_time'), data.get('end_time'), data.get('total_kwh'), data.get('total_euros'))
                         )
                         conn.commit()
@@ -319,7 +331,10 @@ def start_kafka_listener(producer, gui_queue):
                         if conn:
                             conn.close()
 
-                    # 2. Actualizar estado y GUI
+                    # Borrarlo del dict de telemetría
+                    with telemetry_lock:
+                        current_telemetry.pop(cp_id, None)
+
                     if charge_status == 'FINALIZADO':
                         print(f"✅ Carga finalizada en {cp_id}. Volviendo a ACTIVADO.")
                         update_cp_status_in_db(cp_id, 'ACTIVADO')
@@ -330,19 +345,64 @@ def start_kafka_listener(producer, gui_queue):
                         gui_queue.put(("ADD_MESSAGE", f"Carga en {cp_id} FINALIZADA."))
                     
                     elif charge_status == 'FINALIZADO_AVERIA':
-                        print(f"❌ Carga interrumpida por avería en {cp_id}. El CP permanece AVERIADO.")
+                        print(f"❌  Carga interrumpida por avería en {cp_id}. El CP permanece AVERIADO.")
                         
-                        # --- ACTUALIZACIÓN GUI ---
-                        gui_queue.put(("UPDATE_CP", cp_id, "AVERIADO", None))
-                        gui_queue.put(("ADD_MESSAGE", f"Carga en {cp_id} INTERRUMPIDA por avería."))
+                    elif charge_status == 'FINALIZADO_PARADA':
+                        print(f"🛑  Carga interrumpida por parada admin en {cp_id}. El CP permanece PARADO.")
+            # --- FIN SECCIÓN 'topic_data_streaming' ---
 
         except json.JSONDecodeError:
             print(f"[KAFKA_ERROR] Mensaje malformado: {msg.value}")
         except Exception as e:
             print(f"[KAFKA_ERROR] Error procesando mensaje: {e}")
+# --- FIN FUNCIÓN CORREGIDA ---
 
-# --- Lógica de Resiliencia (MODIFICADA para GUI) ---
-def check_cp_heartbeats(producer, gui_queue):
+def central_command_input(producer, active_connections, lock):
+    """Hilo que escucha comandos del admin en la terminal de Central."""
+    print("✅ [ADMIN] Hilo de comandos iniciado. Escribe 'HELP' para ver opciones.")
+    while True:
+        try:
+            cmd_line = input("> ")
+            parts = cmd_line.strip().split()
+            if not parts:
+                continue
+
+            command = parts[0].upper()
+            
+            if command == 'HELP':
+                print("Comandos disponibles:")
+                print("  STOP [CP_ID]   - Pone un CP en 'PARADO' (Out of Order)")
+                print("  RESUME [CP_ID] - Vuelve a poner un CP en 'ACTIVADO'")
+                
+            elif command in ('STOP', 'RESUME') and len(parts) == 2:
+                cp_id = parts[1]
+                new_status = 'PARADO' if command == 'STOP' else 'ACTIVADO'
+                
+                target_conn = None
+                with lock:
+                    target_conn = active_connections.get(cp_id)
+                
+                if target_conn:
+                    try:
+                        cmd_to_send = "STOP_CP" if command == 'STOP' else "RESUME_CP"
+                        send_socket_message(target_conn, cmd_to_send)
+                        print(f"✅ [ADMIN] Comando '{cmd_to_send}' enviado a {cp_id}.")
+                        
+                        update_cp_status_in_db(cp_id, new_status)
+                        broadcast_status_change(producer, cp_id, new_status)
+                        
+                    except Exception as e:
+                        print(f"❌ [ADMIN] Error enviando comando a {cp_id}: {e}")
+                else:
+                    print(f"❌ [ADMIN] {cp_id} no está conectado (socket no encontrado).")
+
+        except EOFError:
+            break
+        except Exception as e:
+            print(f"❌ [ADMIN] Error en hilo de comandos: {e}")
+
+# --- 3. Lógica de Resiliencia ---
+def check_cp_heartbeats(producer):
     """Hilo de vigilancia que comprueba los 'last_heartbeat'."""
     print(f"✅ [RESILIENCIA] Vigilante de heartbeats iniciado (Timeout: {HEARTBEAT_TIMEOUT}s)...")
     gui_queue.put(("ADD_MESSAGE", f"Vigilante Heartbeats OK (Timeout {HEARTBEAT_TIMEOUT}s)"))
@@ -371,110 +431,78 @@ def check_cp_heartbeats(producer, gui_queue):
 
         for row in stale_cps:
             cp_id = row['cp_id']
-            print(f"[RESILIENCIA] No se recibió heartbeat de {cp_id}. Marcando como DESCONECTADO.")
-            
+            print(f" [RESILIENCIA] No se recibió heartbeat de {cp_id}. Marcando como DESCONECTADO.")
             update_cp_status_in_db(cp_id, 'DESCONECTADO')
             broadcast_status_change(producer, cp_id, 'DESCONECTADO')
-            
-            # --- ACTUALIZACIÓN GUI ---
-            gui_queue.put(("UPDATE_CP", cp_id, "DESCONECTADO", None))
-            gui_queue.put(("ADD_MESSAGE", f"[RESILIENCIA] Heartbeat perdido para {cp_id} -> DESCONECTADO"))
 
+# --- 4. Lógica del Dashboard (TUI) ---
+def generate_dashboard(current_telemetry_snapshot):
+    """Genera la tabla de Rich para el dashboard."""
+    table = Table(title=f"Panel de Control EVCharging (Actualizado: {time.strftime('%H:%M:%S')})")
+    
+    table.add_column("CP ID", style="cyan", no_wrap=True)
+    table.add_column("Ubicación", style="magenta")
+    table.add_column("Estado", style="white")
+    table.add_column("Info (Precio / Suministro)", style="yellow") # Columna 4 (Híbrida)
 
-# --- NUEVA Lógica para Carga Inicial de la GUI ---
-def get_initial_cps_from_db():
-    """
-    Consulta la BBDD al arrancar para poblar la GUI.
-    Calcula las posiciones de la rejilla (grid) dinámicamente.
-    """
-    print("Cargando CPs iniciales desde la BBDD para la GUI...")
-    cps_para_gui = []
-    conn = None
+    style_suministrando_chillon = Style(color="bright_green", bold=True)
+    style_suministrando_oscuro = Style(color="green")
+
+    conn = get_db_connection()
     try:
-        conn = get_db_connection()
-        # Asumo que tienes estas columnas. ¡Ajusta esta query a tu BBDD!
-        cursor = conn.execute("SELECT cp_id, location, price_kwh FROM ChargingPoints ORDER BY cp_id")
+        cursor = conn.execute("SELECT cp_id, location, price_kwh, status FROM ChargingPoints ORDER BY cp_id")
         rows = cursor.fetchall()
         
-        for i, row in enumerate(rows):
-            cps_para_gui.append({
-                "id": row['cp_id'],
-                "loc": row['location'],
-                "price": f"{row['price_kwh']:.2f}€/kWh",
-                "grid_row": i // 5,  # 5 columnas por fila
-                "grid_col": i % 5
-            })
-        print(f"Cargados {len(rows)} CPs en la rejilla de la GUI.")
+        for row in rows:
+            status = row['status']
+            cp_id = row['cp_id']
+            price_kwh = row['price_kwh']
+            
+            style = None
+            info_text = ""
+
+            if status == 'SUMINISTRANDO':
+                if int(time.time()) % 2 == 0:
+                    style = style_suministrando_chillon
+                else:
+                    style = style_suministrando_oscuro
+                
+                telemetry = current_telemetry_snapshot.get(cp_id)
+                if telemetry:
+                    info_text = f"{telemetry['kwh']:.2f} kWh | {telemetry['euros']:.2f} €"
+                else:
+                    info_text = "Iniciando..."
+            
+            else:
+                style = STATUS_COLORS.get(status, Style(color="white"))
+                info_text = f"{price_kwh:.2f} €/kWh"
+            
+            table.add_row(
+                row['cp_id'],
+                row['location'],
+                f"{status}",
+                info_text,
+                style=style
+            )
+            
     except sqlite3.Error as e:
         print(f"[GUI_ERROR] No se pudo leer la BBDD para la carga inicial: {e}")
         print("Asegúrate de que 'ChargingPoints' tiene las columnas 'cp_id', 'location', 'price_kwh'")
     finally:
-        if conn:
-            conn.close()
-    
-    return cps_para_gui
-
-# --- NUEVA Clase Conectora (para los botones de la GUI) ---
-class BackendConnector:
-    """
-    Esta clase actúa como "controlador" para la GUI.
-    La GUI llama a estos métodos cuando se pulsa un botón.
-    """
-    def __init__(self, producer, active_connections, lock, gui_queue):
-        self.producer = producer
-        self.active_connections = active_connections
-        self.lock = lock
-        self.gui_queue = gui_queue
-
-    def request_parar_cp(self, cp_id):
-        """Lógica para el botón 'Parar CP'."""
-        print(f"ADMIN: Petición de PARAR {cp_id}")
-        self._send_admin_command(cp_id, 'PARADO', 'STOP_CP')
-
-    def request_reanudar_cp(self, cp_id):
-        """Lógica para el botón 'Reanudar CP'."""
-        print(f"ADMIN: Petición de REANUDAR {cp_id}")
-        self._send_admin_command(cp_id, 'ACTIVADO', 'RESUME_CP')
-
-    def _send_admin_command(self, cp_id, new_status, socket_cmd):
-        target_conn = None
-        with self.lock:
-            target_conn = self.active_connections.get(cp_id)
+        conn.close()
         
-        if target_conn:
-            try:
-                # 1. Envía el comando al Monitor por el socket
-                send_socket_message(target_conn, socket_cmd)
-                
-                # 2. Actualiza la BBDD
-                update_cp_status_in_db(cp_id, new_status)
-                
-                # 3. Difunde el cambio por Kafka
-                broadcast_status_change(self.producer, cp_id, new_status)
-                
-                # 4. Actualiza la GUI
-                self.gui_queue.put(("ADD_MESSAGE", f"Comando '{new_status}' enviado a {cp_id}."))
-                self.gui_queue.put(("UPDATE_CP", cp_id, new_status, None))
-                
-            except Exception as e:
-                print(f"❌ [ADMIN] Error enviando comando a {cp_id}: {e}")
-                self.gui_queue.put(("ADD_MESSAGE", f"ERROR enviando comando a {cp_id}"))
-        else:
-            print(f"❌ [ADMIN] {cp_id} no está conectado (socket no encontrado).")
-            self.gui_queue.put(("ADD_MESSAGE", f"ERROR: {cp_id} no está conectado (socket no encontrado)."))
-
-
-# --- Hilo Principal (MODIFICADO para GUI) ---
+    return Panel(table)
 
 if __name__ == "__main__":
-    # --- Globales para hilos de backend ---
-    active_socket_connections = {} # { "CP_ID": conn_object }
+    # --- Globales para comandos de Central ---
+    active_socket_connections = {}
     connections_lock = threading.Lock()
     
-    # 0. Crear la cola de comunicación
-    gui_queue = queue.Queue()
-
-    # 1. Inicializar la BBDD
+    # --- Globales de Telemetría ---
+    current_telemetry = {}
+    telemetry_lock = threading.Lock()
+    
+    # 0. Inicializar la BBDD
     if not os.path.exists(DB_NAME):
         try:
             import init_db
@@ -499,53 +527,54 @@ if __name__ == "__main__":
         gui_queue.put(("ADD_MESSAGE", f"ERROR conectando a Kafka: {e}"))
         sys.exit(1)
 
-    # --- Configuración de la GUI ---
-    
-    # 3. Iniciar la aplicación GUI (en el hilo principal)
-    app = CentralApp(gui_queue)
-    
-    # 4. Crear el conector del backend y pasárselo a la GUI
-    backend_connector = BackendConnector(producer, active_socket_connections, connections_lock, gui_queue)
-    app.set_controller(backend_connector)
-
-    # 5. Cargar los CPs iniciales desde la BBDD a la GUI
-    initial_cps = get_initial_cps_from_db()
-    app.load_initial_cps(initial_cps)
-
-    # --- Iniciar Hilos de Backend ---
-
-    # 6. Iniciar hilo del Servidor de Sockets
+    # 2. Iniciar hilo del Servidor de Sockets
     socket_thread = threading.Thread(
         target=start_socket_server, 
-        args=(producer, active_socket_connections, connections_lock, gui_queue), # Pasa la cola
+        args=(producer, active_socket_connections, connections_lock),
         daemon=True
     )
     socket_thread.start()
 
-    # 7. Iniciar hilo del Consumidor de Kafka
+    # 3. Iniciar hilo del Consumidor de Kafka
     kafka_thread = threading.Thread(
         target=start_kafka_listener, 
-        args=(producer, gui_queue), # Pasa la cola
+        args=(producer, telemetry_lock, current_telemetry), # Pasar los nuevos globales
         daemon=True
     )
     kafka_thread.start()
 
-    # 8. Iniciar hilo del Vigilante de Heartbeats
-    heartbeat_thread = threading.Thread(
-        target=check_cp_heartbeats, 
-        args=(producer, gui_queue), # Pasa la cola
-        daemon=True
-    )
+    # 4. Iniciar hilo del Vigilante de Heartbeats
+    heartbeat_thread = threading.Thread(target=check_cp_heartbeats, args=(producer,), daemon=True)
     heartbeat_thread.start()
     
-    # 9. Iniciar el bucle principal de la GUI
-    print("Iniciando GUI... (EV_Central en funcionamiento)")
-    gui_queue.put(("ADD_MESSAGE", "CENTRAL system status OK"))
+    # 5. Iniciar hilo de Comandos de Admin
+    admin_thread = threading.Thread(
+        target=central_command_input, 
+        args=(producer, active_socket_connections, connections_lock),
+        daemon=True
+    )
+    admin_thread.start()
     
-    try:
-        app.mainloop()
-    except KeyboardInterrupt:
-        print("\nCerrando EV_Central...")
-    finally:
-        producer.close()
-        print("Productor de Kafka cerrado. Adiós.")
+    # 6. Iniciar el Dashboard TUI en el hilo principal
+    print("Iniciando Dashboard... (Presiona Ctrl+C para salir)")
+    time.sleep(1)
+
+    # Bucle Live con screen=False para que funcione el input()
+    with Live(generate_dashboard({}), refresh_per_second=1, screen=False) as live:
+        try:
+            while True:
+                time.sleep(1)
+                
+                # Crear un snapshot thread-safe de la telemetría
+                telemetry_snapshot = {}
+                with telemetry_lock:
+                    telemetry_snapshot = current_telemetry.copy()
+                
+                # Pasar el snapshot a la función de renderizado
+                live.update(generate_dashboard(telemetry_snapshot))
+                
+        except KeyboardInterrupt:
+            print("\n Deteniendo EV_Central...")
+        finally:
+            producer.close()
+            print("Productor de Kafka cerrado. Adiós.")
