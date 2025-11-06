@@ -1,19 +1,16 @@
-# ev_driver/EV_Driver.py
 import sys
 import time
 import json
 import threading
 import queue
 import os
-import socket # Para el historial
+import socket 
 from kafka import KafkaConsumer, KafkaProducer
 from tkinter import messagebox
 
-# Importa la GUI que ya teníamos
 from driver_gui import DriverApp
 
 class BackendController:
-    """Maneja toda la lógica de Kafka (productor, consumidor, bucles) en hilos."""
     
     def __init__(self, gui_queue):
         self.gui_queue = gui_queue
@@ -28,9 +25,7 @@ class BackendController:
         self.service_finished_event = threading.Event()
 
     def connect(self, driver_id, broker):
-        """
-        Llamado por la GUI. Inicializa el productor y lanza los hilos de backend.
-        """
+        
         self.driver_id = driver_id
         self.kafka_broker = broker
         self.response_topic = f'topic_driver_{self.driver_id}'
@@ -43,17 +38,15 @@ class BackendController:
             )
             self.gui_queue.put(("ADD_MESSAGE", "Productor Kafka OK."))
         except Exception as e:
-            self.gui_queue.put(("ADD_MESSAGE", f"❌ Error conectando Productor: {e}"))
+            self.gui_queue.put(("ADD_MESSAGE", f"ERROR Error conectando Productor: {e}"))
             return
 
-        # 1. Pedir historial (en un hilo)
         history_thread = threading.Thread(
             target=self._fetch_offline_history,
             daemon=True
         )
         history_thread.start()
 
-        # 2. Iniciar el hilo Consumidor (como antes)
         consumer_thread = threading.Thread(
             target=self._start_kafka_listener,
             daemon=True
@@ -62,14 +55,12 @@ class BackendController:
         time.sleep(1) 
         
     def _fetch_offline_history(self):
-        """
-        Se conecta por socket a Central (puerto 8000) para pedir el historial.
-        """
+        
         self.gui_queue.put(("ADD_MESSAGE", "Comprobando historial de recargas..."))
         try:
             sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             central_host = self.kafka_broker.split(':')[0]
-            sock.connect((central_host, 8000)) # Puerto 8000 de EV_Central
+            sock.connect((central_host, 8000)) 
             
             request_msg = f"GET_HISTORY;{self.driver_id}\n"
             sock.sendall(request_msg.encode('utf-8'))
@@ -95,26 +86,20 @@ class BackendController:
                 self.gui_queue.put(("ADD_MESSAGE", "No hay recargas offline pendientes."))
 
         except Exception as e:
-            self.gui_queue.put(("ADD_MESSAGE", f"❌ Error recuperando historial: {e}"))
+            self.gui_queue.put(("ADD_MESSAGE", f" Error recuperando historial: {e}"))
             print(f"Error recuperando historial: {e}")
             
     def _start_kafka_listener(self):
-        """
-        Inicia el consumidor. Escucha en 3 tópicos.
-        (Lógica de Sergi integrada)
-        """
+       
         try:
-            # --- INICIO DE LA CORRECCIÓN ---
             consumer = KafkaConsumer(
-                self.response_topic,        # Tópico de respuesta de Central
-                'topic_data_streaming',   # Tópico de telemetría de los Engines
-                'topic_status_broadcast', # Tópico de estado de TODOS los CPs
+                self.response_topic,       
+                'topic_data_streaming',   
+                'topic_status_broadcast', 
                 bootstrap_servers=self.kafka_broker,
                 value_deserializer=lambda m: json.loads(m.decode('utf-8')),
-                # ¡LÍNEA 'group_id' ELIMINADA!
                 auto_offset_reset='latest'
             )
-            # --- FIN DE LA CORRECCIÓN ---
             
             self.gui_queue.put(("ADD_MESSAGE", "Oyente Kafka OK. Escuchando..."))
 
@@ -122,31 +107,27 @@ class BackendController:
                 data = msg.value
                 msg_cp_id = data.get('cp_id')
 
-                # --- LÓGICA DE SINCRONIZACIÓN DE SERGI ---
                 with self.state_lock:
-                    # Ignorar mensajes que no sean para el CP que estamos esperando
-                    # PERO siempre aceptar los mensajes de 'broadcast'
+                  
                     if msg.topic != 'topic_status_broadcast' and msg_cp_id != self.active_cp_id:
                         continue
-                # --- FIN LÓGICA ---
             
-                # --- Tópico 1: Respuesta de Central (Aprobado/Denegado) ---
+
                 if msg.topic == self.response_topic:
                     status = data.get('status')
                     if status == 'APPROVED':
-                        msg_txt = f"✅ SOLICITUD APROBADA para {data.get('cp_id')}"
+                        msg_txt = f"OK SOLICITUD APROBADA para {data.get('cp_id')}"
                         self.gui_queue.put(("ADD_MESSAGE", msg_txt))
                         self.gui_queue.put(("ADD_MESSAGE", "...Esperando telemetría..."))
                     
                     elif status == 'DENIED':
-                        msg_txt = f"❌ SOLICITUD DENEGADA para {data.get('cp_id')}"
+                        msg_txt = f"ERROR SOLICITUD DENEGADA para {data.get('cp_id')}"
                         self.gui_queue.put(("ADD_MESSAGE", msg_txt))
                         self.gui_queue.put(("ADD_MESSAGE", f"   Razón: {data.get('reason')}"))
                         with self.state_lock:
                             self.active_cp_id = None
                         self.service_finished_event.set() 
 
-                # --- Tópico 2: Telemetría del Engine (Suministro/Finalizado) ---
                 elif msg.topic == 'topic_data_streaming':
                     if data.get('driver_id') != self.driver_id:
                         continue
@@ -159,11 +140,11 @@ class BackendController:
                     elif status in ('FINALIZADO', 'FINALIZADO_AVERIA', 'FINALIZADO_PARADA'):
                         self.gui_queue.put(("ADD_MESSAGE", "\n" + "="*20))
                         if status == 'FINALIZADO':
-                            self.gui_queue.put(("ADD_MESSAGE", f"✅ Recarga FINALIZADA."))
+                            self.gui_queue.put(("ADD_MESSAGE", f"OK Recarga FINALIZADA."))
                         elif status == 'FINALIZADO_AVERIA':
-                            self.gui_queue.put(("ADD_MESSAGE", f"❌ Recarga INTERRUMPIDA POR AVERÍA."))
+                            self.gui_queue.put(("ADD_MESSAGE", f"ERROR Recarga INTERRUMPIDA POR AVERÍA."))
                         elif status == 'FINALIZADO_PARADA':
-                             self.gui_queue.put(("ADD_MESSAGE", f"🛑 Recarga PARADA por la Central."))
+                             self.gui_queue.put(("ADD_MESSAGE", f"!!! Recarga PARADA por la Central."))
                         
                         self.gui_queue.put(("ADD_MESSAGE", f"   Total: {data.get('total_kwh'):.2f} kWh"))
                         self.gui_queue.put(("ADD_MESSAGE", f"   Coste: {data.get('total_euros'):.2f} €"))
@@ -174,15 +155,14 @@ class BackendController:
                             self.active_cp_id = None
                         self.service_finished_event.set()
                 
-                # --- Tópico 3: Estado de TODOS los CPs (para la lista) ---
+                
                 elif msg.topic == 'topic_status_broadcast':
                     self.gui_queue.put(("UPDATE_CP_LIST", data))
 
         except Exception as e:
-            self.gui_queue.put(("ADD_MESSAGE", f"❌ Error fatal en oyente Kafka: {e}"))
+            self.gui_queue.put(("ADD_MESSAGE", f" Error fatal en oyente Kafka: {e}"))
             
     def _send_request(self, cp_id):
-        """Función helper para enviar la solicitud de carga."""
         if not self.producer:
             self.gui_queue.put(("ADD_MESSAGE", "Error: Productor no conectado."))
             return
@@ -201,14 +181,12 @@ class BackendController:
             self.producer.flush()
             self.gui_queue.put(("ADD_MESSAGE", f"[{self.driver_id}] Solicitud para {cp_id} enviada..."))
         except Exception as e:
-            self.gui_queue.put(("ADD_MESSAGE", f"❌ Error enviando solicitud: {e}"))
+            self.gui_queue.put(("ADD_MESSAGE", f" Error enviando solicitud: {e}"))
             with self.state_lock:
                 self.active_cp_id = None
             
-    # --- Funciones llamadas por la GUI ---
     
     def request_manual_service(self, cp_id):
-        """Solicita una única carga manual."""
         self.gui_queue.put(("ADD_MESSAGE", "\n--- Nueva Petición Manual ---"))
         
         with self.state_lock:
@@ -219,7 +197,6 @@ class BackendController:
         self._send_request(cp_id)
         
     def start_file_services(self, file_path):
-        """Inicia el bucle de servicios de archivo en un nuevo hilo."""
         self.gui_queue.put(("ADD_MESSAGE", f"Iniciando servicios desde: {file_path}"))
         file_thread = threading.Thread(
             target=self._run_file_loop,
@@ -228,9 +205,7 @@ class BackendController:
         )
         file_thread.start()
 
-    # --- Lógica de Estado (de Sergi) ---
     def _load_driver_state(self):
-        """Carga el índice del último servicio completado."""
         if not os.path.exists(self.state_file):
             return 0
         try:
@@ -242,12 +217,11 @@ class BackendController:
             return 0
 
     def _save_driver_state(self, next_index):
-        """Guarda el índice del PRÓXIMO servicio a ejecutar."""
         try:
             with open(self.state_file, 'w') as f:
                 json.dump({'next_service_index': next_index}, f)
         except Exception as e:
-            self.gui_queue.put(("ADD_MESSAGE", f"❌ Error CRÍTICO: No se pudo guardar el estado."))
+            self.gui_queue.put(("ADD_MESSAGE", f" Error CRÍTICO: No se pudo guardar el estado."))
             
     def _clear_driver_state(self):
         if os.path.exists(self.state_file):
@@ -255,15 +229,13 @@ class BackendController:
 
 
     def _run_file_loop(self, file_path):
-        """
-        El bucle que lee el archivo y procesa los servicios uno por uno.
-        """
+        
         try:
             with open(file_path, 'r') as f:
                 services = [line.strip() for line in f if line.strip()]
             self.gui_queue.put(("ADD_MESSAGE", f"Servicios a solicitar: {services}"))
         except Exception as e:
-            self.gui_queue.put(("ADD_MESSAGE", f"❌ Error leyendo archivo: {e}"))
+            self.gui_queue.put(("ADD_MESSAGE", f" Error leyendo archivo: {e}"))
             return
             
         if not services:
@@ -307,7 +279,6 @@ class BackendController:
             self.producer.close()
             print("Productor de Kafka cerrado.")
 
-# --- Punto de Entrada Principal ---
 def main():
     gui_queue = queue.Queue()
     app = DriverApp(gui_queue)
@@ -315,7 +286,7 @@ def main():
     app.set_controller(backend)
     
     def on_closing():
-        if messagebox.askokcancel("Salir", "¿Seguro que quieres salir?"):
+        if messagebox.askokcancel("Salir", "seguro que quieres salir?"):
             backend.close_producer()
             app.destroy()
             

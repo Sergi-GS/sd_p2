@@ -1,22 +1,19 @@
-# ev_cp/EV_CP_M.py
 import socket
 import threading
 import time
 import argparse
 import sys
 
-# --- Variables Globales ---
 central_conn = None
 central_lock = threading.Lock()
 cp_id_global = None
-last_reported_status = "DESCONECTADO" # Correcto para el arranque
+last_reported_status = "DESCONECTADO" 
 
 engine_conn = None
 engine_lock = threading.Lock()
-status_lock = threading.Lock()      # Lock para 'last_reported_status'
+status_lock = threading.Lock()     
 
 def send_to_central(message_str):
-    # ... (Esta función no cambia) ...
     global central_conn, central_lock
     with central_lock:
         if not central_conn:
@@ -30,7 +27,6 @@ def send_to_central(message_str):
             return False
 
 def send_to_engine(message_str):
-    # ... (Esta función no cambia) ...
     global engine_conn, engine_lock
     with engine_lock:
         if not engine_conn:
@@ -44,14 +40,11 @@ def send_to_engine(message_str):
             return False
 
 def health_check_loop(engine_ip, engine_port, cp_id):
-    """
-    Un hilo que se conecta al Engine (EV_CP_E) y lo monitorea.
-    """
+    
     global last_reported_status, engine_conn, engine_lock, status_lock
     
     while True:
         if not engine_conn:
-            # ... (Lógica de reconexión al Engine no cambia) ...
             try:
                 print(f"[{cp_id}-Monitor] Conectando a Engine en {engine_ip}:{engine_port}...")
                 conn_obj = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -66,7 +59,7 @@ def health_check_loop(engine_ip, engine_port, cp_id):
                 with engine_lock:
                     engine_conn = conn_obj
             except Exception:
-                engine_conn = None # Asegurarse de que esté None
+                engine_conn = None 
             
             if not engine_conn:
                 with status_lock:
@@ -77,7 +70,6 @@ def health_check_loop(engine_ip, engine_port, cp_id):
                 time.sleep(5)
                 continue
 
-        # --- Bucle de PING/PONG MODIFICADO ---
         try:
             if not send_to_engine("PING"):
                  raise ConnectionResetError("Fallo al enviar PING a Engine")
@@ -92,34 +84,28 @@ def health_check_loop(engine_ip, engine_port, cp_id):
             else:
                 raise ConnectionResetError("Respuesta de Engine inválida")
 
-            # --- LÓGICA DE ESTADO MODIFICADA ---
             with status_lock:
-                # Si el Engine dice 'AVERIADO' (KO) pero nosotros estamos en 'PARADO',
-                # NO lo reportes. El 'PARADO' administrativo tiene prioridad.
                 if current_status == "AVERIADO" and last_reported_status == "PARADO":
-                    continue # Ignorar el KO, ya sabemos que está parado
+                    continue 
                 
-                # Si el Engine dice 'ACTIVADO' (OK) pero nosotros estamos en 'PARADO',
-                # NO lo reportes. Solo Central puede reanudar.
                 if current_status == "ACTIVADO" and last_reported_status == "PARADO":
-                    continue # Ignorar el OK, seguimos PARADO
+                    continue 
                 
                 if current_status != last_reported_status:
-                    print(f"[{cp_id}-Monitor] 🚨 Estado del Engine ha cambiado a {current_status}. Reportando a Central...")
+                    print(f"[{cp_id}-Monitor]  Estado del Engine ha cambiado a {current_status}. Reportando a Central...")
                     if send_to_central(f"STATUS;{current_status}"):
                         last_reported_status = current_status
                     else:
-                        print(f"[{cp_id}-Monitor] ❌ No se pudo reportar el nuevo estado a Central.")
-            # --- FIN LÓGICA MODIFICADA ---
+                        print(f"[{cp_id}-Monitor] ERROR No se pudo reportar el nuevo estado a Central.")
 
         except (ConnectionResetError, BrokenPipeError, OSError) as e:
-            print(f"[{cp_id}-Monitor] 💔 Conexión perdida con Engine: {e}. Reintentando...")
+            print(f"[{cp_id}-Monitor]  Conexión perdida con Engine: {e}. Reintentando...")
             with engine_lock:
                 if engine_conn:
                     engine_conn.close()
                 engine_conn = None
             
-            with status_lock: # <-- Añadido lock
+            with status_lock: 
                 if last_reported_status != "AVERIADO":
                     if send_to_central("STATUS;AVERIADO"):
                          last_reported_status = "AVERIADO"
@@ -127,17 +113,16 @@ def health_check_loop(engine_ip, engine_port, cp_id):
         time.sleep(1)
 
 def central_heartbeat_loop():
-    # ... (Esta función no cambia) ...
     while True:
         if send_to_central("HEARTBEAT"):
             pass
         else:
-            print(f"[{cp_id_global}-Monitor] 💔 Fallo al enviar heartbeat. El hilo principal reconectará.")
+            print(f"[{cp_id_global}-Monitor]  Fallo al enviar heartbeat. El hilo principal reconectará.")
             break 
         time.sleep(10)
 
 def main():
-    global central_conn, cp_id_global, last_reported_status, engine_conn, engine_lock, status_lock # <-- Añadido status_lock
+    global central_conn, cp_id_global, last_reported_status, engine_conn, engine_lock, status_lock 
     
     parser = argparse.ArgumentParser(description="EV Charging Point - Monitor")
     parser.add_argument('--central-ip', required=True, help="IP de EV_Central")
@@ -166,8 +151,7 @@ def main():
             with central_lock:
                 central_conn = conn_obj
             
-            # 1. Registrarse
-            # ... (Lógica de registro y precio no cambia) ...
+           
             location = f"C/{args.cp_id.lower()} 123"
             base_price = 0.50
             bonus_per_char = 0.03
@@ -177,14 +161,13 @@ def main():
             if not send_to_central(register_msg):
                 raise ConnectionError("Fallo al registrarse.")
             
-            print(f"[{cp_id_global}-Monitor] ✅ Registrado en Central como {args.cp_id}.")
+            print(f"[{cp_id_global}-Monitor] OK Registrado en Central como {args.cp_id}.")
             with status_lock:
                 last_reported_status = "DESCONECTADO"
             
             heartbeat_thread = threading.Thread(target=central_heartbeat_loop, daemon=True)
             heartbeat_thread.start()
 
-            # 3. Bucle de Escucha de Comandos MODIFICADO
             while True:
                 data = central_conn.recv(1024)
                 if not data:
@@ -195,11 +178,10 @@ def main():
                     if not cmd:
                         continue
                         
-                    print(f"[{cp_id_global}-Monitor] 📩 Comando recibido de Central: {cmd}")
+                    print(f"[{cp_id_global}-Monitor]  Comando recibido de Central: {cmd}")
                     
-                    # --- LÓGICA DE 'STOP' MODIFICADA ---
                     if cmd == "STOP_CP":
-                        print(f"[{cp_id_global}-Monitor]   -> 🛑 Central ha ordenado PARAR.")
+                        print(f"[{cp_id_global}-Monitor]    Central ha ordenado PARAR.")
                         with status_lock:
                             last_reported_status = "PARADO"
                         send_to_engine("FORCE_STOP")
@@ -209,16 +191,14 @@ def main():
                         with status_lock:
                             last_reported_status = "ACTIVADO"
                         send_to_engine("FORCE_RESUME")
-                    # --- FIN LÓGICA MODIFICADA ---
 
                     elif cmd.startswith("ACK;"):
                         pass
                     else:
-                        print(f"[{cp_id_global}-Monitor]   -> ❓ Comando desconocido.")
+                        print(f"[{cp_id_global}-Monitor]    Comando desconocido.")
 
         except (ConnectionRefusedError, ConnectionResetError, BrokenPipeError, ConnectionError, OSError) as e:
-            # ... (Lógica de reconexión no cambia) ...
-            print(f"[{cp_id_global}-Monitor] 💔 Conexión perdida con Central: {e}. Reintentando en 5s...")
+            print(f"[{cp_id_global}-Monitor]  Conexión perdida con Central: {e}. Reintentando en 5s...")
             with central_lock:
                 if central_conn:
                     central_conn.close()
