@@ -99,6 +99,11 @@ def health_check_loop(engine_ip, engine_port, cp_id):
                 if current_status == "AVERIADO" and last_reported_status == "PARADO":
                     continue # Ignorar el KO, ya sabemos que está parado
                 
+                # Si el Engine dice 'ACTIVADO' (OK) pero nosotros estamos en 'PARADO',
+                # NO lo reportes. Solo Central puede reanudar.
+                if current_status == "ACTIVADO" and last_reported_status == "PARADO":
+                    continue # Ignorar el OK, seguimos PARADO
+                
                 if current_status != last_reported_status:
                     print(f"[{cp_id}-Monitor] 🚨 Estado del Engine ha cambiado a {current_status}. Reportando a Central...")
                     if send_to_central(f"STATUS;{current_status}"):
@@ -173,6 +178,8 @@ def main():
                 raise ConnectionError("Fallo al registrarse.")
             
             print(f"[{cp_id_global}-Monitor] ✅ Registrado en Central como {args.cp_id}.")
+            with status_lock:
+                last_reported_status = "DESCONECTADO"
             
             heartbeat_thread = threading.Thread(target=central_heartbeat_loop, daemon=True)
             heartbeat_thread.start()

@@ -94,7 +94,6 @@ def update_cp_heartbeat(cp_id):
         if conn:
             conn.close()
 
-# --- FUNCIÓN CORREGIDA/AÑADIDA ---
 def get_cp_info_from_db(cp_id):
     """Obtiene el estado y el precio de un CP."""
     conn = None
@@ -112,7 +111,6 @@ def get_cp_info_from_db(cp_id):
         if conn:
             conn.close()
     return info
-# --- FIN FUNCIÓN CORREGIDA ---
 
 
 def broadcast_status_change(producer, cp_id, new_status, location=None, price=None):
@@ -212,11 +210,12 @@ def start_socket_server(producer, active_connections, lock):
         client_thread.start()
 
 #kafka
+# --- ESTA ES LA FUNCIÓN CORREGIDA ---
 def start_kafka_listener(producer, telemetry_lock, current_telemetry):
     """Inicia el consumidor/productor de Kafka para los Drivers y Engines."""
     consumer = KafkaConsumer(
-        'topic_requests',
-        'topic_data_streaming',
+        'topic_requests',        # Peticiones de Drivers
+        'topic_data_streaming',  # Datos de Engines
         bootstrap_servers=KAFKA_SERVER,
         value_deserializer=lambda m: json.loads(m.decode('utf-8')),
         auto_offset_reset='latest'
@@ -227,6 +226,7 @@ def start_kafka_listener(producer, telemetry_lock, current_telemetry):
         try:
             data = msg.value
             
+            # --- SECCIÓN DE 'topic_requests' (CORREGIDA) ---
             if msg.topic == 'topic_requests':
                 cp_id = data['cp_id']
                 driver_id = data['driver_id']
@@ -272,7 +272,9 @@ def start_kafka_listener(producer, telemetry_lock, current_telemetry):
                             producer.flush()
                         except Exception as e:
                             print(f"[KAFKA_ERROR] No se pudo enviar 'DENIED' a {response_topic}: {e}")
+            # --- FIN SECCIÓN 'topic_requests' ---
 
+            # --- SECCIÓN DE 'topic_data_streaming' (CORREGIDA) ---
             elif msg.topic == 'topic_data_streaming':
                 
                 charge_status = data.get('status')
@@ -318,16 +320,16 @@ def start_kafka_listener(producer, telemetry_lock, current_telemetry):
                     
                     elif charge_status == 'FINALIZADO_AVERIA':
                         print(f"❌  Carga interrumpida por avería en {cp_id}. El CP permanece AVERIADO.")
-                        # (Correcto: el Monitor ya lo puso 'AVERIADO')
                         
                     elif charge_status == 'FINALIZADO_PARADA':
                         print(f"🛑  Carga interrumpida por parada admin en {cp_id}. El CP permanece PARADO.")
-                        # (Correcto: el Admin ya lo puso 'PARADO')
+            # --- FIN SECCIÓN 'topic_data_streaming' ---
 
         except json.JSONDecodeError:
             print(f"[KAFKA_ERROR] Mensaje malformado: {msg.value}")
         except Exception as e:
             print(f"[KAFKA_ERROR] Error procesando mensaje: {e}")
+# --- FIN FUNCIÓN CORREGIDA ---
 
 def central_command_input(producer, active_connections, lock):
     """Hilo que escucha comandos del admin en la terminal de Central."""

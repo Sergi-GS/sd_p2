@@ -6,6 +6,8 @@ import json
 import argparse
 from kafka import KafkaConsumer, KafkaProducer
 import random
+import os
+import sys
 
 # --- Variables Globales de Estado ---
 is_healthy = True  # ¿Está el hardware bien? (Controlado por 'Enter')
@@ -243,7 +245,6 @@ def failure_simulator():
             break
 
 if __name__ == "__main__":
-    # ... (El main no cambia) ...
     parser = argparse.ArgumentParser(description="EV Charging Point - Engine")
     parser.add_argument('--socket-port', type=int, required=True, help="Puerto para el socket del Monitor")
     parser.add_argument('--kafka-broker', type=str, required=True, help="IP:Puerto del broker de Kafka")
@@ -251,7 +252,26 @@ if __name__ == "__main__":
     
     kafka_broker_global = args.kafka_broker
 
+    # 1. Iniciar el simulador de fallos en un hilo daemon
     fail_thread = threading.Thread(target=failure_simulator, daemon=True)
     fail_thread.start()
 
-    start_socket_server(args.socket_port)
+    # 2. Iniciar el servidor de sockets en OTRO hilo daemon
+    socket_server_thread = threading.Thread(
+        target=start_socket_server, 
+        args=(args.socket_port,), 
+        daemon=True
+    )
+    socket_server_thread.start()
+
+    # 3. El hilo principal se queda en un bucle simple
+    #    que SÍ puede ser interrumpido por Ctrl+C
+    print(f"✅ [Engine] Módulos iniciados. (PID: {os.getpid()}). Presiona Ctrl+C para salir.")
+    try:
+        while True:
+            # El hilo principal "duerme" para seguir vivo,
+            # mientras los hilos daemon hacen el trabajo.
+            time.sleep(5)
+    except KeyboardInterrupt:
+        print("\n🔌 [Engine] Cerrando... (Ctrl+C detectado)")
+        sys.exit(0)
