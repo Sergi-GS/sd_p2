@@ -6,83 +6,82 @@ import argparse
 import sys
 
 # --- Variables Globales ---
-central_conn = None                 # Objeto socket para la conexión a Central
-central_lock = threading.Lock()     # Lock para proteger el acceso a central_conn
-cp_id_global = None                 # ID de este CP
-last_reported_status = "ACTIVADO"   # Para evitar enviar reportes duplicados
+central_conn = None
+central_lock = threading.Lock()
+cp_id_global = None
+last_reported_status = "DESCONECTADO" # Correcto para el arranque
 
-# --- Comunicación Segura con Central ---
+engine_conn = None
+engine_lock = threading.Lock()
+status_lock = threading.Lock()      # Lock para 'last_reported_status'
 
 def send_to_central(message_str):
-    """
-    Envía un mensaje a EV_Central de forma thread-safe.
-    Usa el protocolo simple (separado por \n).
-    """
+    # ... (Esta función no cambia) ...
     global central_conn, central_lock
-    
     with central_lock:
         if not central_conn:
             print(f"[{cp_id_global}-Monitor] Error: No conectado a Central.")
             return False
-        
         try:
             central_conn.sendall(f"{message_str}\n".encode('utf-8'))
             return True
         except (ConnectionResetError, BrokenPipeError, OSError) as e:
             print(f"[{cp_id_global}-Monitor] Error fatal al enviar a Central: {e}")
-            # El bucle principal se encargará de cerrar y reconectar
             return False
 
-# --- Hilo 1: Vigilante del Engine ---
+def send_to_engine(message_str):
+    # ... (Esta función no cambia) ...
+    global engine_conn, engine_lock
+    with engine_lock:
+        if not engine_conn:
+            print(f"[{cp_id_global}-Monitor] Error: No conectado a Engine.")
+            return False
+        try:
+            engine_conn.sendall(f"{message_str}\n".encode('utf-8'))
+            return True
+        except (ConnectionResetError, BrokenPipeError, OSError) as e:
+            print(f"[{cp_id_global}-Monitor] Error fatal al enviar a Engine: {e}")
+            return False
 
 def health_check_loop(engine_ip, engine_port, cp_id):
     """
     Un hilo que se conecta al Engine (EV_CP_E) y lo monitorea.
-    Reporta fallos a EV_Central.
     """
-    global last_reported_status
-    engine_conn = None
-
-    while True: # Bucle de reconexión al Engine
+    global last_reported_status, engine_conn, engine_lock, status_lock
+    
+    while True:
         if not engine_conn:
+            # ... (Lógica de reconexión al Engine no cambia) ...
             try:
                 print(f"[{cp_id}-Monitor] Conectando a Engine en {engine_ip}:{engine_port}...")
-                engine_conn = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-                engine_conn.connect((engine_ip, engine_port))
-                
-                # 1. Enviar ID al Engine (requisito de EV_CP_E)
-                engine_conn.sendall(f"ID;{cp_id}\n".encode('utf-8'))
-                response = engine_conn.recv(1024).decode('utf-8').strip()
-                
+                conn_obj = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                conn_obj.connect((engine_ip, engine_port))
+                conn_obj.sendall(f"ID;{cp_id}\n".encode('utf-8'))
+                response = conn_obj.recv(1024).decode('utf-8').strip()
                 if response != "ID_OK":
-                    print(f"[{cp_id}-Monitor] Engine rechazó el ID. Respuesta: {response}. Reintentando...")
-                    engine_conn.close()
-                    engine_conn = None
+                    conn_obj.close()
                     time.sleep(5)
                     continue
-                
                 print(f"[{cp_id}-Monitor] ✅ Conectado y autenticado con Engine.")
-
-            except ConnectionRefusedError:
-                print(f"[{cp_id}-Monitor] ❌ Engine no encontrado. Reintentando en 5s...")
-                engine_conn = None
-            except Exception as e:
-                print(f"[{cp_id}-Monitor] ❌ Error conectando a Engine: {e}")
-                engine_conn = None
+                with engine_lock:
+                    engine_conn = conn_obj
+            except Exception:
+                engine_conn = None # Asegurarse de que esté None
             
             if not engine_conn:
-                # Si no se pudo conectar, reportar AVERIADO a Central (si no se ha hecho ya)
-                if last_reported_status != "AVERIADO":
-                    print(f"[{cp_id}-Monitor] 🚨 Reportando Engine 'AVERIADO' a Central (conexión fallida).")
-                    if send_to_central(f"STATUS;AVERIADO"):
-                        last_reported_status = "AVERIADO"
+                with status_lock:
+                    if last_reported_status != "AVERIADO":
+                        print(f"[{cp_id}-Monitor] 🚨 Reportando Engine 'AVERIADO' a Central (conexión fallida).")
+                        if send_to_central(f"STATUS;AVERIADO"):
+                            last_reported_status = "AVERIADO"
                 time.sleep(5)
-                continue # Vuelve al inicio del bucle de reconexión
+                continue
 
-        # --- Bucle de PING/PONG (mientras esté conectado) ---
+        # --- Bucle de PING/PONG MODIFICADO ---
         try:
-            # Enviar PING
-            engine_conn.sendall(b"PING\n")
+            if not send_to_engine("PING"):
+                 raise ConnectionResetError("Fallo al enviar PING a Engine")
+
             response = engine_conn.recv(1024).decode('utf-8').strip()
 
             current_status = ""
@@ -91,49 +90,49 @@ def health_check_loop(engine_ip, engine_port, cp_id):
             elif response == "KO":
                 current_status = "AVERIADO"
             else:
-                # Si la respuesta es inválida, el Engine está roto
                 raise ConnectionResetError("Respuesta de Engine inválida")
 
-            # Reportar a Central SOLO si el estado ha cambiado
-            if current_status != last_reported_status:
-                print(f"[{cp_id}-Monitor] 🚨 Estado del Engine ha cambiado a {current_status}. Reportando a Central...")
-                if send_to_central(f"STATUS;{current_status}"):
-                    last_reported_status = current_status
-                else:
-                    print(f"[{cp_id}-Monitor] ❌ No se pudo reportar el nuevo estado a Central.")
+            # --- LÓGICA DE ESTADO MODIFICADA ---
+            with status_lock:
+                # Si el Engine dice 'AVERIADO' (KO) pero nosotros estamos en 'PARADO',
+                # NO lo reportes. El 'PARADO' administrativo tiene prioridad.
+                if current_status == "AVERIADO" and last_reported_status == "PARADO":
+                    continue # Ignorar el KO, ya sabemos que está parado
+                
+                if current_status != last_reported_status:
+                    print(f"[{cp_id}-Monitor] 🚨 Estado del Engine ha cambiado a {current_status}. Reportando a Central...")
+                    if send_to_central(f"STATUS;{current_status}"):
+                        last_reported_status = current_status
+                    else:
+                        print(f"[{cp_id}-Monitor] ❌ No se pudo reportar el nuevo estado a Central.")
+            # --- FIN LÓGICA MODIFICADA ---
 
         except (ConnectionResetError, BrokenPipeError, OSError) as e:
             print(f"[{cp_id}-Monitor] 💔 Conexión perdida con Engine: {e}. Reintentando...")
-            engine_conn.close()
-            engine_conn = None
+            with engine_lock:
+                if engine_conn:
+                    engine_conn.close()
+                engine_conn = None
             
-            # Si se pierde la conexión, reportar AVERIADO
-            if last_reported_status != "AVERIADO":
-                if send_to_central("STATUS;AVERIADO"):
-                     last_reported_status = "AVERIADO"
+            with status_lock: # <-- Añadido lock
+                if last_reported_status != "AVERIADO":
+                    if send_to_central("STATUS;AVERIADO"):
+                         last_reported_status = "AVERIADO"
         
-        time.sleep(1) # Ping cada 1 segundo
-
-# --- Hilo 2: Heartbeats para Central ---
+        time.sleep(1)
 
 def central_heartbeat_loop():
-    """
-    Un hilo que simplemente envía heartbeats a Central cada 10s.
-    """
+    # ... (Esta función no cambia) ...
     while True:
         if send_to_central("HEARTBEAT"):
-            # print(f"[{cp_id_global}-Monitor] ❤️  Heartbeat enviado a Central.")
             pass
         else:
             print(f"[{cp_id_global}-Monitor] 💔 Fallo al enviar heartbeat. El hilo principal reconectará.")
-            break # El hilo principal se encargará de la reconexión
-        
-        time.sleep(10) # Frecuencia del heartbeat
-
-# --- Hilo Principal: Conexión a Central y Escucha ---
+            break 
+        time.sleep(10)
 
 def main():
-    global central_conn, cp_id_global, last_reported_status
+    global central_conn, cp_id_global, last_reported_status, engine_conn, engine_lock, status_lock # <-- Añadido status_lock
     
     parser = argparse.ArgumentParser(description="EV Charging Point - Monitor")
     parser.add_argument('--central-ip', required=True, help="IP de EV_Central")
@@ -145,7 +144,6 @@ def main():
     
     cp_id_global = args.cp_id
 
-    # Iniciar el hilo de health check (Hilo 1)
     health_thread = threading.Thread(
         target=health_check_loop, 
         args=(args.engine_ip, args.engine_port, args.cp_id), 
@@ -153,35 +151,33 @@ def main():
     )
     health_thread.start()
 
-    # Bucle principal (Conexión a Central)
-    while True: # Bucle de reconexión a Central
+    while True: 
         heartbeat_thread = None
         try:
             print(f"[{cp_id_global}-Monitor] Conectando a Central en {args.central_ip}:{args.central_port}...")
             conn_obj = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             conn_obj.connect((args.central_ip, args.central_port))
             
-            # Asignar a la variable global
             with central_lock:
                 central_conn = conn_obj
             
             # 1. Registrarse
-            # (En un sistema real, estos datos vendrían de un config local)
+            # ... (Lógica de registro y precio no cambia) ...
             location = f"C/{args.cp_id.lower()} 123"
-            price = 0.50 + (len(args.cp_id) % 10) * 0.01 # Precio simulado
+            base_price = 0.50
+            bonus_per_char = 0.03
+            price = base_price + (len(args.cp_id)) * bonus_per_char           
             register_msg = f"REGISTER;{args.cp_id};{location};{price:.2f}"
             
             if not send_to_central(register_msg):
                 raise ConnectionError("Fallo al registrarse.")
             
             print(f"[{cp_id_global}-Monitor] ✅ Registrado en Central como {args.cp_id}.")
-            last_reported_status = "DESCONECTADO" # Resetear estado en cada registro
             
-            # 2. Iniciar hilo de Heartbeat (Hilo 2)
             heartbeat_thread = threading.Thread(target=central_heartbeat_loop, daemon=True)
             heartbeat_thread.start()
 
-            # 3. Bucle de Escucha de Comandos (en hilo principal)
+            # 3. Bucle de Escucha de Comandos MODIFICADO
             while True:
                 data = central_conn.recv(1024)
                 if not data:
@@ -194,29 +190,36 @@ def main():
                         
                     print(f"[{cp_id_global}-Monitor] 📩 Comando recibido de Central: {cmd}")
                     
+                    # --- LÓGICA DE 'STOP' MODIFICADA ---
                     if cmd == "STOP_CP":
                         print(f"[{cp_id_global}-Monitor]   -> 🛑 Central ha ordenado PARAR.")
-                        # (Aquí iría la lógica para enviar "STOP" al Engine, si fuera necesario)
+                        with status_lock:
+                            last_reported_status = "PARADO"
+                        send_to_engine("FORCE_STOP")
+                    
                     elif cmd == "RESUME_CP":
                         print(f"[{cp_id_global}-Monitor]   -> ▶️ Central ha ordenado REANUDAR.")
-                        # (Lógica para reanudar el Engine)
+                        with status_lock:
+                            last_reported_status = "ACTIVADO"
+                        send_to_engine("FORCE_RESUME")
+                    # --- FIN LÓGICA MODIFICADA ---
+
                     elif cmd.startswith("ACK;"):
-                        pass # Ignorar ACKs de registro y heartbeats
+                        pass
                     else:
                         print(f"[{cp_id_global}-Monitor]   -> ❓ Comando desconocido.")
 
         except (ConnectionRefusedError, ConnectionResetError, BrokenPipeError, ConnectionError, OSError) as e:
+            # ... (Lógica de reconexión no cambia) ...
             print(f"[{cp_id_global}-Monitor] 💔 Conexión perdida con Central: {e}. Reintentando en 5s...")
             with central_lock:
                 if central_conn:
                     central_conn.close()
                 central_conn = None
-            
-            # Esperar a que el hilo de heartbeat muera (si estaba vivo)
             if heartbeat_thread and heartbeat_thread.is_alive():
-                heartbeat_thread.join(1.0) # Esperar max 1s
+                heartbeat_thread.join(1.0)
         
-        time.sleep(5) # Esperar 5s antes de reintentar la conexión
+        time.sleep(5)
 
 if __name__ == "__main__":
     main()
