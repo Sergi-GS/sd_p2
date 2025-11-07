@@ -1,8 +1,8 @@
-
 import tkinter as tk
 from tkinter import ttk
 from tkinter import font, filedialog, messagebox
 import queue
+import os
 
 COLOR_VERDE = "#4CAF50"
 COLOR_ROJO = "#F44336"
@@ -147,17 +147,24 @@ class DriverApp(tk.Tk):
             self.entry_manual_cp.delete(0, "end")
 
     def _on_load_file(self):
-        file_path = filedialog.askopenfilename(
-            title="Seleccionar archivo de servicios",
-            filetypes=(("Archivos de Texto", "*.txt"), ("Todos los archivos", "*.*"))
-        )
-        if not file_path:
-            return
+        
+            try:
+                # __file__ es la ruta de este script (driver_gui.py)
+                script_dir = os.path.dirname(os.path.abspath(__file__))
+                file_path = os.path.join(script_dir, "services.txt")
             
-        if self.backend_controller:
-            self.backend_controller.start_file_services(file_path)
-
-    
+                if not os.path.exists(file_path):
+                    messagebox.showerror("Error", f"No se encontró el archivo 'services.txt' en:\n{file_path}")
+                    return
+            
+                if self.backend_controller:
+                    self.backend_controller.start_file_services(file_path)
+                else:
+                    self._add_log_message("ERROR: Backend no conectado.")
+                
+            except Exception as e:
+                messagebox.showerror("Error", f"Fallo al cargar services.txt: {e}")
+        
     def _add_log_message(self, message):
         self.log_listbox.insert("end", message)
         self.log_listbox.see("end") 

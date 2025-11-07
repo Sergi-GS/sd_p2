@@ -5,6 +5,7 @@ import threading
 import queue
 import os
 import socket 
+import random
 from kafka import KafkaConsumer, KafkaProducer
 from tkinter import messagebox
 
@@ -247,7 +248,9 @@ class BackendController:
         try:
             with open(file_path, 'r') as f:
                 services = [line.strip() for line in f if line.strip()]
-            self.gui_queue.put(("ADD_MESSAGE", f"Servicios a solicitar: {services}"))
+            random.shuffle(services)
+            self.gui_queue.put(("ADD_MESSAGE", f"Servicios (barajados) a solicitar: {services}"))
+            
         except Exception as e:
             self.gui_queue.put(("ADD_MESSAGE", f" Error leyendo archivo: {e}"))
             return
@@ -269,14 +272,23 @@ class BackendController:
         for i in range(start_index, total_services):
             cp_id = services[i]
             
+            
+            # 1. Comprobamos el estado DENTRO de un cerrojo corto
+            needs_to_wait = False
             with self.state_lock:
                 if self.active_cp_id == cp_id:
                     self.gui_queue.put(("ADD_MESSAGE", f"Ya hay una carga activa en {cp_id}, esperando a que termine..."))
-                else:
-                    self.gui_queue.put(("ADD_MESSAGE", "\n" + "="*30))
-                    self.gui_queue.put(("ADD_MESSAGE", f"[{self.driver_id}] Solicitando servicio {i+1}/{total_services} en: {cp_id}"))
-                    self._send_request(cp_id)
+                    needs_to_wait = True
+
+            # 2. Si no estaba activo, enviamos la solicitud FUERA del cerrojo
+            if not needs_to_wait:
+                self.gui_queue.put(("ADD_MESSAGE", "\n" + "="*30))
+                self.gui_queue.put(("ADD_MESSAGE", f"[{self.driver_id}] Solicitando servicio {i+1}/{total_services} en: {cp_id}"))
+                
+                # Esta llamada ya no está dentro del 'with self.state_lock' de este bucle
+                self._send_request(cp_id) 
             
+
             self.service_finished_event.wait()
             self._save_driver_state(i + 1)
             self.service_finished_event.clear()
