@@ -89,73 +89,87 @@ class BackendController:
             self.gui_queue.put(("ADD_MESSAGE", f" Error recuperando historial: {e}"))
             print(f"Error recuperando historial: {e}")
             
+    # (Dentro de la clase BackendController en EV_Driver.py)
+
     def _start_kafka_listener(self):
-       
+        """
+        Inicia el consumidor. Escucha en 3 tópicos.
+        """
         try:
+            # --- INICIO DE LA CORRECCIÓN ---
             consumer = KafkaConsumer(
-                self.response_topic,       
-                'topic_data_streaming',   
-                'topic_status_broadcast', 
+                self.response_topic,        # Tópico de respuesta de Central
+                'topic_data_streaming',   # Tópico de telemetría de los Engines
+                'topic_status_broadcast', # Tópico de estado de TODOS los CPs
                 bootstrap_servers=self.kafka_broker,
                 value_deserializer=lambda m: json.loads(m.decode('utf-8')),
+               
+                # ¡ESTA LÍNEA ES LA CORRECCIÓN!
+                # Le da una ID fija al consumidor para que Kafka guarde los mensajes
+                # si el Driver se cae o si el mensaje llega demasiado rápido.
+                group_id=f'driver_group_{self.driver_id}',
+               
                 auto_offset_reset='latest'
             )
-            
+            # --- FIN DE LA CORRECCIÓN ---
+           
             self.gui_queue.put(("ADD_MESSAGE", "Oyente Kafka OK. Escuchando..."))
 
             for msg in consumer:
                 data = msg.value
                 msg_cp_id = data.get('cp_id')
 
+                # --- LÓGICA DE SINCRONIZACIÓN ---
                 with self.state_lock:
-                  
                     if msg.topic != 'topic_status_broadcast' and msg_cp_id != self.active_cp_id:
                         continue
-            
-
+                # --- FIN LÓGICA ---
+           
+                # --- Tópico 1: Respuesta de Central (Aprobado/Denegado) ---
                 if msg.topic == self.response_topic:
                     status = data.get('status')
                     if status == 'APPROVED':
-                        msg_txt = f"OK SOLICITUD APROBADA para {data.get('cp_id')}"
+                        msg_txt = f" SOLICITUD APROBADA para {data.get('cp_id')}"
                         self.gui_queue.put(("ADD_MESSAGE", msg_txt))
                         self.gui_queue.put(("ADD_MESSAGE", "...Esperando telemetría..."))
-                    
+                   
                     elif status == 'DENIED':
-                        msg_txt = f"ERROR SOLICITUD DENEGADA para {data.get('cp_id')}"
+                        msg_txt = f" SOLICITUD DENEGADA para {data.get('cp_id')}"
                         self.gui_queue.put(("ADD_MESSAGE", msg_txt))
                         self.gui_queue.put(("ADD_MESSAGE", f"   Razón: {data.get('reason')}"))
                         with self.state_lock:
                             self.active_cp_id = None
-                        self.service_finished_event.set() 
+                        self.service_finished_event.set() # <-- Esto desbloqueará el hilo
 
+                # --- Tópico 2: Telemetría del Engine (Suministro/Finalizado) ---
                 elif msg.topic == 'topic_data_streaming':
                     if data.get('driver_id') != self.driver_id:
                         continue
-                    
+                   
                     status = data.get('status')
-                    
+                   
                     if status == 'SUMINISTRANDO':
                         self.gui_queue.put(("UPDATE_CHARGE", data))
-                    
+                   
                     elif status in ('FINALIZADO', 'FINALIZADO_AVERIA', 'FINALIZADO_PARADA'):
                         self.gui_queue.put(("ADD_MESSAGE", "\n" + "="*20))
                         if status == 'FINALIZADO':
-                            self.gui_queue.put(("ADD_MESSAGE", f"OK Recarga FINALIZADA."))
+                            self.gui_queue.put(("ADD_MESSAGE", f" Recarga FINALIZADA."))
                         elif status == 'FINALIZADO_AVERIA':
-                            self.gui_queue.put(("ADD_MESSAGE", f"ERROR Recarga INTERRUMPIDA POR AVERÍA."))
+                            self.gui_queue.put(("ADD_MESSAGE", f" Recarga INTERRUMPIDA POR AVERÍA."))
                         elif status == 'FINALIZADO_PARADA':
-                             self.gui_queue.put(("ADD_MESSAGE", f"!!! Recarga PARADA por la Central."))
-                        
+                             self.gui_queue.put(("ADD_MESSAGE", f" Recarga PARADA por la Central."))
+                       
                         self.gui_queue.put(("ADD_MESSAGE", f"   Total: {data.get('total_kwh'):.2f} kWh"))
                         self.gui_queue.put(("ADD_MESSAGE", f"   Coste: {data.get('total_euros'):.2f} €"))
                         self.gui_queue.put(("ADD_MESSAGE", "="*20 + "\n"))
-                        
+                       
                         self.gui_queue.put(("RESET_CHARGE", None))
                         with self.state_lock:
                             self.active_cp_id = None
-                        self.service_finished_event.set()
-                
-                
+                        self.service_finished_event.set() # <-- Esto desbloqueará el hilo
+               
+                # --- Tópico 3: Estado de TODOS los CPs (para la lista) ---
                 elif msg.topic == 'topic_status_broadcast':
                     self.gui_queue.put(("UPDATE_CP_LIST", data))
 
