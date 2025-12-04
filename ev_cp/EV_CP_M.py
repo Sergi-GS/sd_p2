@@ -55,7 +55,7 @@ def health_check_loop(engine_ip, engine_port, cp_id):
                     conn_obj.close()
                     time.sleep(5)
                     continue
-                print(f"[{cp_id}-Monitor] ✅ Conectado y autenticado con Engine.")
+                print(f"[{cp_id}-Monitor] OK Conectado y autenticado con Engine.")
                 with engine_lock:
                     engine_conn = conn_obj
             except Exception:
@@ -64,7 +64,7 @@ def health_check_loop(engine_ip, engine_port, cp_id):
             if not engine_conn:
                 with status_lock:
                     if last_reported_status != "AVERIADO":
-                        print(f"[{cp_id}-Monitor] 🚨 Reportando Engine 'AVERIADO' a Central (conexión fallida).")
+                        print(f"[{cp_id}-Monitor] ERROR Reportando Engine 'AVERIADO' a Central (conexión fallida).")
                         if send_to_central(f"STATUS;AVERIADO"):
                             last_reported_status = "AVERIADO"
                 time.sleep(5)

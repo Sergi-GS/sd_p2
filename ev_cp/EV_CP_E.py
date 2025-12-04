@@ -37,7 +37,7 @@ def simulate_charging(driver_id, cp_id, price_kwh):
     total_euros = 0
     
     charge_interrupted = None 
-    duracion_carga = random.randint(8, 20)
+    duracion_carga = random.randint(500, 700)
     
     for i in range(duracion_carga):
         
@@ -215,7 +215,7 @@ def failure_simulator():
             
             with state_lock:
                 is_healthy = not is_healthy
-                status = "BIEN OK" if is_healthy else "AVERIADO ERRRO"
+                status = "BIEN OK" if is_healthy else "AVERIADO ERROR"
             print(f"\n [SIMULADOR] ¡Estado de SALUD cambiado! Ahora está: {status}\n")
 
         except EOFError:
