@@ -3,6 +3,7 @@ import threading
 import time
 import argparse
 import sys
+import requests  # <--- NUEVO: Librería para peticiones HTTP
 
 central_conn = None
 central_lock = threading.Lock()
@@ -12,6 +13,48 @@ last_reported_status = "DESCONECTADO"
 engine_conn = None
 engine_lock = threading.Lock()
 status_lock = threading.Lock()     
+
+# Variables para guardar las credenciales que nos devolverá el Registry
+auth_token = None
+encryption_key = None
+
+def register_in_registry(registry_ip, registry_port, cp_id, location, price):
+    """
+    NUEVO: Función que contacta con el Registry vía API REST.
+    Devuelve True si el registro es exitoso.
+    """
+    global auth_token, encryption_key
+    
+    url = f"http://{registry_ip}:{registry_port}/api/register-cp"
+    payload = {
+        "cp_id": cp_id,
+        "location": location,
+        "price": price
+    }
+    
+    print(f"[{cp_id}-Monitor] ⏳ Contactando con Registry en {url}...")
+    
+    try:
+        # Hacemos la petición POST
+        response = requests.post(url, json=payload, timeout=5)
+        
+        if response.status_code == 200:
+            data = response.json()
+            # Guardamos las claves que nos da el Registry (para uso futuro)
+            auth_token = data.get('auth_token')
+            encryption_key = data.get('encryption_key')
+            print(f"[{cp_id}-Monitor] ✅ REGISTRO EXITOSO. Token recibido.")
+            return True
+        else:
+            print(f"[{cp_id}-Monitor] ❌ Error en registro (Code {response.status_code}): {response.text}")
+            return False
+            
+    except requests.exceptions.ConnectionError:
+        print(f"[{cp_id}-Monitor] ❌ No se puede conectar con el Registry (¿Está encendido?).")
+        return False
+    except Exception as e:
+        print(f"[{cp_id}-Monitor] ❌ Excepción al registrar: {e}")
+        return False
 
 def send_to_central(message_str):
     global central_conn, central_lock
@@ -48,13 +91,17 @@ def health_check_loop(engine_ip, engine_port, cp_id):
             try:
                 print(f"[{cp_id}-Monitor] Conectando a Engine en {engine_ip}:{engine_port}...")
                 conn_obj = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                conn_obj.settimeout(5) # Timeout para no bloquear
                 conn_obj.connect((engine_ip, engine_port))
                 conn_obj.sendall(f"ID;{cp_id}\n".encode('utf-8'))
+                
                 response = conn_obj.recv(1024).decode('utf-8').strip()
                 if response != "ID_OK":
                     conn_obj.close()
                     time.sleep(5)
                     continue
+                
+                conn_obj.settimeout(None) # Quitamos timeout para operación normal
                 print(f"[{cp_id}-Monitor] OK Conectado y autenticado con Engine.")
                 with engine_lock:
                     engine_conn = conn_obj
@@ -130,10 +177,37 @@ def main():
     parser.add_argument('--engine-ip', required=True, help="IP de EV_CP_E (Engine local)")
     parser.add_argument('--engine-port', type=int, required=True, help="Puerto de EV_CP_E (Engine local)")
     parser.add_argument('--cp-id', required=True, help="ID único de este Charging Point")
-    args = parser.parse_args()
     
+    # --- NUEVOS ARGUMENTOS PARA EL REGISTRY ---
+    parser.add_argument('--registry-ip', required=True, help="IP de EV_Registry")
+    parser.add_argument('--registry-port', type=int, default=6000, help="Puerto de EV_Registry")
+    
+    args = parser.parse_args()
     cp_id_global = args.cp_id
 
+    # Calculamos datos del CP (para enviarlos al Registro y luego a Central)
+    location = f"C/{args.cp_id.lower()} 123"
+    base_price = 0.50
+    bonus_per_char = 0.03
+    price = base_price + (len(args.cp_id)) * bonus_per_char
+
+    # -------------------------------------------------------------------
+    # PASO 1 (NUEVO): Intentar registrarse en el Registry antes de nada
+    # -------------------------------------------------------------------
+    registered = False
+    while not registered:
+        registered = register_in_registry(
+            args.registry_ip, 
+            args.registry_port, 
+            args.cp_id, 
+            location, 
+            price
+        )
+        if not registered:
+            print(f"[{cp_id_global}-Monitor] Reintentando registro en 5 segundos...")
+            time.sleep(5)
+
+    # Una vez registrado, arrancamos el hilo de salud del Engine
     health_thread = threading.Thread(
         target=health_check_loop, 
         args=(args.engine_ip, args.engine_port, args.cp_id), 
@@ -141,6 +215,9 @@ def main():
     )
     health_thread.start()
 
+    # -------------------------------------------------------------------
+    # PASO 2: Conexión Normal a Central (Sockets)
+    # -------------------------------------------------------------------
     while True: 
         heartbeat_thread = None
         try:
@@ -151,17 +228,14 @@ def main():
             with central_lock:
                 central_conn = conn_obj
             
-           
-            location = f"C/{args.cp_id.lower()} 123"
-            base_price = 0.50
-            bonus_per_char = 0.03
-            price = base_price + (len(args.cp_id)) * bonus_per_char           
+            # Mantenemos el mensaje REGISTER por compatibilidad con el socket legacy,
+            # aunque ya nos hemos registrado por API.
             register_msg = f"REGISTER;{args.cp_id};{location};{price:.2f}"
             
             if not send_to_central(register_msg):
-                raise ConnectionError("Fallo al registrarse.")
+                raise ConnectionError("Fallo al registrarse (Handshake Socket).")
             
-            print(f"[{cp_id_global}-Monitor] OK Registrado en Central como {args.cp_id}.")
+            print(f"[{cp_id_global}-Monitor] OK Socket establecido con Central.")
             with status_lock:
                 last_reported_status = "DESCONECTADO"
             
